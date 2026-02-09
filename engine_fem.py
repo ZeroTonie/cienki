@@ -34,9 +34,18 @@ class CalculixDeckBuilder:
             lines = f.readlines()
             skip_next = False
             for line in lines:
-                if line.strip().upper().startswith("*HEADING"):
+                line_upper = line.strip().upper()
+                
+                # A. Usuwanie *HEADING (tytuł z Gmsha)
+                if line_upper.startswith("*HEADING"):
                     skip_next = True # Pomiń tę linię i następną (tytuł)
                     continue
+                
+                # B. Usuwanie *SOLID SECTION (to naprawia błąd "nonexistent material")
+                # Usuwamy sekcję zdefiniowaną przez Gmsh, bo my definiujemy własną poprawną niżej
+                if line_upper.startswith("*SOLID SECTION"):
+                    continue
+
                 if skip_next:
                     skip_next = False
                     continue

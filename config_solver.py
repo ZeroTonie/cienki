@@ -1,5 +1,5 @@
 # AUTO-GENERATED CONFIG
-LOAD_PARAMS = { "Fx": 24000.0, "F_promien": 450.0, "L": 200.0, "w_Ty": 0.2, "w_Tz": 0.2 }
+LOAD_PARAMS = { "Fx": 24000.0, "F_promien": 450.0, "L": 150.0, "w_Ty": 0.2, "w_Tz": 0.2 }
 LISTA_MATERIALOW = ['S355']
 MIN_SZEROKOSC_OTWARCIA = 70.0
 MAX_GRUBOSC_PLASKOWNIKA = 25.0
