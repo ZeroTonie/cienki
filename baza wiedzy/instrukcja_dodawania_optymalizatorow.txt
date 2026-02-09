@@ -1,0 +1,49 @@
+INSTRUKCJA DODAWANIA NOWYCH OPTYMALIZATORÓW DO SYSTEMU "COLUMN OPTIMIZER PRO"
+==============================================================================
+
+Aby nowy algorytm optymalizacyjny (np. genetyczny, brute-force v2) był widoczny 
+w GUI i działał poprawnie, należy spełnić następujące warunki:
+
+1. REJESTRACJA W PLIKU gui_app.py
+---------------------------------
+W sekcji "OPTIMIZER_REGISTRY" należy dodać nowy wpis wg schematu:
+
+    "Nazwa Wyświetlana w Combo": {
+        "file": "nazwa_pliku_backendu.py",   <-- Plik musi leżeć w tym samym katalogu
+        "function": "glowna_petla",          <-- Nazwa funkcji startowej (main)
+        "description": "Krótki opis działania algorytmu dla użytkownika.",
+        "params": {
+            # Słownik parametrów specyficznych dla tego algorytmu.
+            # Te parametry pojawią się dynamicznie w GUI w sekcji "Logika Optymalizacji".
+            # Klucz musi być identyczny jak nazwa zmiennej w config.py, którą algorytm czyta.
+            
+            "NAZWA_ZMIENNEJ_CONFIG": {
+                "label": "Etykieta w GUI:",
+                "default": "Wartość domyślna",
+                "type": "float"  # lub "int", "str", "bool"
+            },
+            # ... kolejne parametry
+        }
+    }
+
+2. WYMAGANIA DLA PLIKU BACKENDU (Solvera/Optymalizatora)
+--------------------------------------------------------
+Nowy plik (np. `genetic_opty.py`) musi:
+
+A. Korzystać z pliku `config.py` jako źródła danych.
+   GUI przed uruchomieniem procesu nadpisuje plik `config.py` wartościami z formularzy.
+   Twój kod musi robić `import config` i czytać z niego wartości (np. config.LOAD_PARAMS['Fx']).
+
+B. Generować wyniki w formacie zgodnym z `solver.ZbieraczWynikow`.
+   Ostateczny plik wyjściowy (.csv) musi mieć taką samą strukturę kolumn jak obecny,
+   aby "Selektor Wyników" (Tab 3) mógł go poprawnie wczytać i filtrować.
+
+C. Obsługiwać parametry plików z configa:
+   - config.NAZWA_BADANIA
+   - config.WSPOLNY_KATALOG
+   
+3. PROCEDURA AKTUALIZACJI
+-------------------------
+1. Wrzuć plik .py do folderu z programem.
+2. Edytuj `gui_app.py` dodając wpis do rejestru.
+3. Uruchom GUI - nowy algorytm pojawi się na liście, a jego parametry załadują się automatycznie.
