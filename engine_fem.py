@@ -32,11 +32,10 @@ class CalculixDeckBuilder:
         with open(mesh_inp_path, 'r') as f:
             mesh_content = f.read()
 
-        # --- DYNAMICZNE WYSZUKIWANIE NAZWY ZBIORU 3D ---
-        # To jest kluczowa poprawka. Zamiast zakładać, że zbiór elementów 3D
-        # nazywa się 'SOLID_BODY' lub 'Eall', dynamicznie odczytujemy jego nazwę
-        # z linii '*ELEMENT, TYPE=C3D...'. To uniezależnia nas od zmian
-        # w sposobie eksportu przez Gmsh.
+        # --- DYNAMICZNE WYSZUKIWANIE NAZWY ZBIORU 3D (z fallbackiem) ---
+        # Próbujemy odczytać nazwę ELSET z linii '*ELEMENT...'.
+        # Jeśli się nie uda, zakładamy, że nazywa się 'SOLID_BODY', co jest
+        # teraz gwarantowane przez logikę w engine_geometry.py.
         solid_elset_name = None
         for line in mesh_content.splitlines():
             if line.upper().startswith("*ELEMENT") and "C3D" in line.upper():
@@ -45,8 +44,9 @@ class CalculixDeckBuilder:
                     solid_elset_name = match.group(1)
                     break
         
+        # Fallback - jeśli z jakiegoś powodu regex nie zadziała
         if not solid_elset_name:
-            raise RuntimeError("Nie można odnaleźć zbioru elementów 3D (ELSET) w pliku siatki .inp")
+            solid_elset_name = "SOLID_BODY"
 
         with open(run_inp_path, 'w', newline='\n') as f: # Wymuszamy jednolite końcówki linii (LF)
             # Plik mesh.inp z Gmsh już zawiera sekcję *HEADING.

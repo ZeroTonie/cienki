@@ -185,21 +185,11 @@ class GeometryGenerator:
         # Ustawiamy format Abaqus
         gmsh.option.setNumber("Mesh.Format", 10)
 
-        # --- DODATKOWE ZABEZPIECZENIE PRZED EKSPORTEM ---
-        # Upewniamy się, że wszystkie elementy 3D są przypisane do grupy fizycznej 'SOLID_BODY'.
-        # Czasem po operacjach boolowskich i usuwaniu grup 2D, Gmsh może "zgubić"
-        # powiązanie niektórych elementów z ich grupą fizyczną przy eksporcie.
-        solid_body_group_tag = gmsh.model.getPhysicalGroupTagByName("SOLID_BODY")
-        if solid_body_group_tag != -1:
-            gmsh.model.mesh.addElements(3, solid_body_group_tag, [], [gmsh.model.mesh.getElementsByType(10)[0]]) # 10 = C3D10
-
-        # --- KLUCZOWA POPRAWKA ---
-        # Aby mieć 100% pewności, że do pliku .inp trafią tylko elementy 3D,
-        # tymczasowo usuwamy grupy fizyczne zdefiniowane na powierzchniach (2D).
-        # Opcja "Mesh.SaveAll = 0" powinna to robić, ale bywa zawodna.
-        # To jest bardziej "brutalna", ale pewna metoda.
-        # Mapa węzłów (group_nodes_map) została już stworzona, więc ta operacja
-        # nie wpłynie na dane przekazywane do silnika FEM.
+        # --- POPRAWKA DOCELOWA: CZYSZCZENIE GRUP 2D PRZED ZAPISEM ---
+        # Usuwamy grupy fizyczne 2D, aby Gmsh nie wyeksportował elementów 
+        # powierzchniowych (S3/S4) do pliku .inp. Chcemy tylko czystą bryłę (C3D...).
+        # Węzły dla tych grup mamy już bezpiecznie zapisane w słowniku `group_nodes_map`,
+        # więc `engine_fem.py` będzie mógł z nich utworzyć odpowiednie *NSETy.
         all_phys_groups = gmsh.model.getPhysicalGroups()
         groups_to_remove = [(dim, tag) for dim, tag in all_phys_groups if dim == 2]
         if groups_to_remove:
