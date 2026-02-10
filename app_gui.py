@@ -12,6 +12,7 @@ import importlib
 import csv
 from datetime import datetime
 import gmsh
+import subprocess
 
 # --- DATA SCIENCE ---
 import numpy as np
@@ -38,13 +39,9 @@ from PyQt6.QtGui import (
 )
 
 # --- MODUŁY LOKALNE ---
-import routing
-from routing import router
 import config_solver
 import material_catalogue
 import engine_solver
-
-# --- NOWE MODUŁY FEM ---
 import engine_geometry
 import ccx_preparer
 
@@ -343,7 +340,7 @@ class OptimizationWorker(QThread):
 class FemWorker(QThread):
     """
     Wątek dla Solvera FEM (Tab 4).
-    Generuje geometrię, siatkę, plik .inp i uruchamia CalculiX.
+    Deleguje całą pracę do engine_geometry i ccx_preparer.
     """
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool)
@@ -354,7 +351,6 @@ class FemWorker(QThread):
         self.candidates = candidates
         self.settings = settings
         self.router = router_instance
-        self.process = None
         self.is_running = True
         
     def stop(self):
@@ -378,8 +374,8 @@ class FemWorker(QThread):
                 fem_dir = self.router.get_path("FEM", create=True)
                 job_name = model_name
 
-                # --- 1. GEOMETRIA ---
-                self.log_signal.emit("1. Generowanie geometrii i siatki...")
+                # --- 1. GEOMETRIA (GMSH) ---
+                self.log_signal.emit("1. Generowanie geometrii i siatki (Engine Geometry)...")
                 geo_p = {
                     "L": float(cand.get("Input_Load_L", 1800.0)),
                     "tp": float(cand.get("Input_Geo_tp", 10.0)),
@@ -388,68 +384,68 @@ class FemWorker(QThread):
                     "bc": float(cand.get("Input_UPE_bc", 80.0)),
                     "twc": float(cand.get("Input_UPE_twc", 6.0)),
                     "tfc": float(cand.get("Input_UPE_tfc", 11.0)),
-                    "rc": float(cand.get("Input_UPE_rc", 13.0)),
                     "yc_global": float(cand.get("Res_Geo_Ys", 0.0)) + float(cand.get("Res_Geo_Delta_Ys", 0.0))
                 }
+                
+                # Wywołanie zewnętrznego generatora
                 geo_results = engine_geometry.create_and_mesh_model(geo_p, self.settings, job_name, fem_dir)
-                self.log_signal.emit(f"   [OK] Geometria i siatka zapisana w: {geo_results['msh_file']}")
+                self.log_signal.emit(f"   [OK] Siatka: {geo_results['msh_file']}")
                 self.preview_signal.emit(geo_results)
 
-                # --- 2. PRZYGOTOWANIE PLIKU .INP ---
-                self.log_signal.emit("2. Przygotowanie pliku .inp dla CalculiX...")
+                # --- 2. PREPARACJA CALCULIX ---
+                self.log_signal.emit("2. Przygotowanie pliku .inp (CCX Preparer)...")
                 inp_path = os.path.join(fem_dir, f"{job_name}.inp")
                 
                 mat_name = cand.get("Stop", "S355")
                 mat_props = material_catalogue.baza_materialow().get(mat_name, {})
-                mat_p = {
-                    "name": mat_name,
-                    "E": mat_props.get('E', 210000),
-                    "nu": 0.3
-                }
+                mat_p = { "name": mat_name, "E": mat_props.get('E', 210000), "nu": 0.3 }
                 
-                # Obciążenia w punkcie referencyjnym
                 r = float(cand.get("Input_Load_F_promien", 0.0))
                 ys = float(cand.get("Res_Geo_Ys", 0.0))
-                yc = float(cand.get("Res_Geo_Yc", 0.0)) # Potrzebne z analityki
+                # yc_global z geometrii
+                yc_glob = geo_p['yc_global'] 
+                
+                # Obliczenie momentów
+                Fy = float(cand.get("Calc_Fy", 0.0))
+                Fx = float(cand.get("Input_Load_Fx", 0.0))
                 
                 load_p = {
-                    "Fx": float(cand.get("Input_Load_Fx", 0.0)),
-                    "Fy": float(cand.get("Calc_Fy", 0.0)),
+                    "Fx": Fx,
+                    "Fy": Fy,
                     "Fz": float(cand.get("Calc_Fz", 0.0)),
-                    "Mx": float(cand.get("Calc_Fy", 0.0)) * (r + geo_p['yc_global'] - ys), # Ms
-                    "My": 0.0, # Mg
-                    "Mz": float(cand.get("Input_Load_Fx", 0.0)) * r # Moment od mimośrodu Fx
+                    "Mx": Fy * (r + yc_glob - ys), # Ms = Fy * ramię_skrętne
+                    "My": 0.0, 
+                    "Mz": Fx * r # Moment gnący od Fx (mimośród)
                 }
 
                 ccx_preparer.generate_inp_file(job_name, inp_path, geo_results, mat_p, load_p, self.settings)
-                self.log_signal.emit(f"   [OK] Plik .inp wygenerowany: {inp_path}")
+                self.log_signal.emit(f"   [OK] Plik .inp gotowy.")
 
                 # --- 3. URUCHOMIENIE CALCULIX ---
-                self.log_signal.emit(f"3. Uruchamianie analizy CalculiX dla {job_name}...")
-                
+                self.log_signal.emit(f"3. Uruchamianie solvera CCX...")
                 ccx_path = os.path.join(os.getcwd(), "ccx", "ccx.exe")
                 if not os.path.exists(ccx_path):
                     ccx_path = "ccx" # Fallback to PATH
 
-                self.process = subprocess.run(
+                proc = subprocess.run(
                     [ccx_path, "-i", job_name],
                     cwd=fem_dir,
                     capture_output=True, text=True, encoding='utf-8'
                 )
 
-                if self.process.returncode == 0:
-                    self.log_signal.emit(f"   [OK] Analiza zakończona sukcesem.")
+                if proc.returncode == 0:
+                    self.log_signal.emit(f"   [OK] Obliczenia zakończone.")
                     success_count += 1
                 else:
-                    self.log_signal.emit(f"   [BŁĄD] Analiza CalculiX nie powiodła się.")
-                    self.log_signal.emit(self.process.stdout)
-                    self.log_signal.emit(self.process.stderr)
+                    self.log_signal.emit(f"   [BŁĄD] Kod błędu: {proc.returncode}")
+                    self.log_signal.emit(proc.stdout)
+                    self.log_signal.emit(proc.stderr)
                 
             except Exception as e:
-                self.log_signal.emit(f"!!! CRITICAL FEM ERROR: {str(e)}")
+                self.log_signal.emit(f"!!! FEM ERROR: {str(e)}")
                 self.log_signal.emit(traceback.format_exc())
         
-        self.log_signal.emit(f"\n>>> ZAKOŃCZONO BATCH. Sukces: {success_count}/{len(self.candidates)}")
+        self.log_signal.emit(f"\n>>> ZAKOŃCZONO. Sukces: {success_count}/{len(self.candidates)}")
         self.finished_signal.emit(True)
 
 # ==============================================================================
@@ -1063,7 +1059,7 @@ class FilterWidget(QWidget):
 
 
 class Tab4_Fem(QSplitter):
-    """Zakładka do konfiguracji i uruchamiania analiz MES."""
+    """Zakładka do konfiguracji i uruchamiania analiz MES - Wersja V7 Generator."""
     def __init__(self, router_instance):
         super().__init__(Qt.Orientation.Horizontal)
         self.router = router_instance
@@ -1091,59 +1087,34 @@ class Tab4_Fem(QSplitter):
         # 2. Ustawienia siatki
         g_mesh = QGroupBox("2. Parametry Siatki (GMSH)")
         f_mesh = QFormLayout(g_mesh)
-        self.inp_mesh_factor = QDoubleSpinBox(); self.inp_mesh_factor.setRange(0.1, 10.0); self.inp_mesh_factor.setValue(1.5); self.inp_mesh_factor.setSingleStep(0.1)
+        self.inp_mesh_factor = QDoubleSpinBox(); self.inp_mesh_factor.setRange(0.1, 10.0); self.inp_mesh_factor.setValue(1.0); self.inp_mesh_factor.setSingleStep(0.1)
+        self.inp_mesh_factor.setToolTip("Mnożnik dla bazowej wielkości elementu (min. grubości ścianki)")
+        
         self.inp_mesh_order = QComboBox(); self.inp_mesh_order.addItems(["1 (Liniowe)", "2 (Kwadratowe)"]); self.inp_mesh_order.setCurrentIndex(1)
-        self.inp_mesh_algo = QComboBox(); self.inp_mesh_algo.addItems(["1: Delaunay", "4: Frontal", "10: HXT"]); self.inp_mesh_algo.setCurrentIndex(0)
         self.inp_mesh_cores = QSpinBox(); self.inp_mesh_cores.setRange(1, os.cpu_count() or 1); self.inp_mesh_cores.setValue(4)
         
-        f_mesh.addRow("Mnożnik rozmiaru el.:", self.inp_mesh_factor)
+        f_mesh.addRow("Wsp. rozmiaru el.:", self.inp_mesh_factor)
         f_mesh.addRow("Rząd elementów:", self.inp_mesh_order)
-        f_mesh.addRow("Algorytm 3D:", self.inp_mesh_algo)
-        f_mesh.addRow("Liczba rdzeni (siatka):", self.inp_mesh_cores)
+        f_mesh.addRow("Liczba rdzeni:", self.inp_mesh_cores)
         left_layout.addWidget(g_mesh)
 
         # 3. Ustawienia Solvera
         g_solver = QGroupBox("3. Parametry Analizy (CalculiX)")
         f_solver = QFormLayout(g_solver)
         self.inp_solver_cores = QSpinBox(); self.inp_solver_cores.setRange(1, os.cpu_count() or 1); self.inp_solver_cores.setValue(4)
-        self.chk_nlgeom = QCheckBox("Uwzględnij nieliniowość geometryczną (NLGEOM)"); self.chk_nlgeom.setChecked(True)
         
-        f_solver.addRow("Liczba rdzeni (solver):", self.inp_solver_cores)
-        f_solver.addRow(self.chk_nlgeom)
+        f_solver.addRow("Liczba rdzeni CCX:", self.inp_solver_cores)
         left_layout.addWidget(g_solver)
 
         left_layout.addStretch()
         self.addWidget(left_widget)
 
-        # --- PRAWA STRONA: WIZUALIZACJA I LOGI ---
-        right_splitter = QSplitter(Qt.Orientation.Vertical)
-        
-        # Panel górny: Wizualizacja
-        vis_panel = QWidget()
-        vis_layout = QHBoxLayout(vis_panel)
-        vis_layout.setContentsMargins(0,0,0,0)
-
-        # Panel sterowania wizualizacją
-        vis_controls = QGroupBox("Podgląd modelu")
-        vis_controls_layout = QVBoxLayout(vis_controls)
-        vis_controls.setMaximumWidth(200)
-        self.list_surfaces = QListWidget()
-        self.list_surfaces.itemChanged.connect(self.on_surface_item_changed)
-        vis_controls_layout.addWidget(QLabel("Pokaż powierzchnie:"))
-        vis_controls_layout.addWidget(self.list_surfaces)
-        
-        if HAS_PYVISTA:
-            self.plotter = QtInteractor(self)
-            vis_layout.addWidget(self.plotter.interactor)
-            vis_layout.addWidget(vis_controls)
-        else:
-            vis_layout.addWidget(QLabel("Zainstaluj PyVista i PyVistaQt, aby włączyć podgląd 3D."))
-
-        # Panel dolny: Uruchamianie i logi
+        # --- PRAWA STRONA: LOGI ---
+        # (Wizualizację można dodać później, skupiamy się na generatorze)
         log_panel = QWidget()
         log_layout = QVBoxLayout(log_panel)
 
-        self.btn_run = QPushButton("🚀 URUCHOM ANALIZĘ WSADOWĄ FEM")
+        self.btn_run = QPushButton("🚀 URUCHOM GENERATOR I SOLVER")
         self.btn_run.setFixedHeight(50)
         self.btn_run.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; font-size: 16px;")
         self.btn_run.clicked.connect(self.run_batch)
@@ -1155,92 +1126,40 @@ class Tab4_Fem(QSplitter):
         log_layout.addWidget(QLabel("<b>Logi Procesu FEM:</b>"))
         log_layout.addWidget(self.console)
 
-        right_splitter.addWidget(vis_panel)
-        right_splitter.addWidget(log_panel)
-        right_splitter.setSizes([600, 200])
-        self.addWidget(right_splitter)
-        
-        self.setStretchFactor(0, 1)
-        self.setStretchFactor(1, 3)
+        self.addWidget(log_panel)
+        self.setSizes([400, 800])
 
     def receive_data(self, candidates):
         self.candidates = candidates
         self.list_candidates.clear()
         if not candidates:
-            self.list_candidates.addItem("Brak kandydatów do analizy.")
+            self.list_candidates.addItem("Brak kandydatów.")
             self.btn_run.setEnabled(False)
             return
-        
         self.btn_run.setEnabled(True)
         for cand in candidates:
-            prof_name = cand.get('Nazwa_Profilu', 'N/A')
-            tp = cand.get('Input_Geo_tp', 0)
-            item = QListWidgetItem(f"Profil: {prof_name}, Płaskownik: {tp}mm")
-            item.setForeground(QColor("#aaffaa"))
-            self.list_candidates.addItem(item)
-        
-        if self.window().tabs.currentIndex() != 3:
-            QMessageBox.information(self, "Przekazano dane", f"Pomyślnie przekazano {len(candidates)} kandydatów do analizy MES.")
+            prof = cand.get('Nazwa_Profilu', '?')
+            tp = cand.get('Input_Geo_tp', '?')
+            self.list_candidates.addItem(f"{prof} + Płaskownik {tp}mm")
 
     def run_batch(self):
-        if not self.candidates:
-            QMessageBox.warning(self, "Błąd", "Brak kandydatów do analizy. Przekaż dane z zakładki '3. Selekcja Wyników'.")
-            return
-
-        # Wyczyszczenie wizualizacji przed startem
-        if self.plotter: self.plotter.clear()
-        self.list_surfaces.clear()
-        self.surface_actors.clear()
-
+        if not self.candidates: return
+        
         settings = {
             "mesh_size_factor": self.inp_mesh_factor.value(),
-            "mesh_order": 2 if self.inp_mesh_order.currentIndex() == 1 else 1,
-            "mesh_algo": [1, 4, 10][self.inp_mesh_algo.currentIndex()],
+            "mesh_order": 2 if "2" in self.inp_mesh_order.currentText() else 1,
             "mesh_cores": self.inp_mesh_cores.value(),
-            "solver_cores": self.inp_solver_cores.value(),
-            "nlgeom": self.chk_nlgeom.isChecked(),
+            "solver_cores": self.inp_solver_cores.value()
         }
 
         self.worker = FemWorker(self.candidates, settings, self.router)
         self.worker.log_signal.connect(self.console.append)
-        self.worker.preview_signal.connect(self.update_preview)
+        # self.worker.preview_signal.connect(...) # Opcjonalnie
         self.worker.finished_signal.connect(lambda s: self.btn_run.setEnabled(True))
+        
         self.btn_run.setEnabled(False)
         self.console.clear()
         self.worker.start()
-
-    def update_preview(self, geo_results):
-        if not self.plotter: return
-
-        self.plotter.clear()
-        self.surface_actors.clear()
-        self.list_surfaces.clear()
-
-        # Główna siatka (wireframe)
-        self.plotter.add_mesh(geo_results['msh_file'], style='wireframe', color='grey', opacity=0.2, label="Siatka")
-
-        # Powierzchnie nazwane
-        for name, stl_path in geo_results.get('surface_stls', {}).items():
-            if os.path.exists(stl_path):
-                actor = self.plotter.add_mesh(stl_path, name=name, label=name)
-                actor.SetVisibility(False)
-                self.surface_actors[name] = actor
-                
-                item = QListWidgetItem(name)
-                item.setCheckState(Qt.CheckState.Unchecked)
-                self.list_surfaces.addItem(item)
-
-        self.plotter.reset_camera()
-
-    def on_surface_item_changed(self, item):
-        if not self.plotter: return
-        
-        actor_name = item.text()
-        if actor_name in self.surface_actors:
-            actor = self.surface_actors[actor_name]
-            is_visible = (item.checkState() == Qt.CheckState.Checked)
-            actor.SetVisibility(is_visible)
-            self.plotter.render()
 
 # ==============================================================================
 # GŁÓWNE OKNO
