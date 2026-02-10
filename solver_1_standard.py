@@ -4,9 +4,8 @@ import json
 import csv
 import importlib
 
-# Dodaj katalog rodzica do ścieżki, żeby widzieć moduły główne (routing, engine_solver itp.)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# --- POPRAWKA: Importujemy routing bezpośrednio, bo jest w tym samym folderze
+import routing
 import engine_solver
 import config_solver
 import material_catalogue
@@ -19,7 +18,6 @@ def sortuj_klucze_wg_priorytetu(wszystkie_klucze):
     """
     Ustawia kolejność kolumn zgodnie z życzeniem użytkownika.
     """
-    # Definicja kolejności priorytetowej (Pełna lista pionowa)
     priorytety = [
         "Stop",             # <--- Materiał
         "Nazwa_Profilu",
@@ -52,12 +50,10 @@ def sortuj_klucze_wg_priorytetu(wszystkie_klucze):
     ]
     
     posortowane = []
-    # 1. Dodaj klucze priorytetowe
     for k in priorytety:
         if k in wszystkie_klucze:
             posortowane.append(k)
             
-    # 2. Dodaj całą resztę
     for k in wszystkie_klucze:
         if k not in posortowane:
             posortowane.append(k)
@@ -82,7 +78,6 @@ def zapisz_wszystkie_formaty(lista_wynikow, sciezka_baza):
         print("(!) Brak danych do zapisu.")
         return
 
-    # Ustalenie kolejności kolumn
     wszystkie_klucze = list(lista_wynikow[0].keys())
     klucze_posortowane = sortuj_klucze_wg_priorytetu(wszystkie_klucze)
 
@@ -141,7 +136,6 @@ def zapisz_wszystkie_formaty(lista_wynikow, sciezka_baza):
                 <table class="config-table">
         """
         
-        # Wypis Configu
         for attr_name in dir(config_solver):
             if attr_name.isupper():
                 val = getattr(config_solver, attr_name)
@@ -156,7 +150,6 @@ def zapisz_wszystkie_formaty(lista_wynikow, sciezka_baza):
                 <thead><tr>
         """
         
-        # Nagłówki
         for k in klucze_posortowane:
             opis = k
             if hasattr(engine_solver, 'OPISY_PARAMETROW') and k in engine_solver.OPISY_PARAMETROW:
@@ -165,7 +158,6 @@ def zapisz_wszystkie_formaty(lista_wynikow, sciezka_baza):
             html += f"<th>{opis}</th>"
         html += "</tr></thead><tbody>"
         
-        # Wiersze
         for row in lista_wynikow:
             html += "<tr>"
             for k in klucze_posortowane:
@@ -198,11 +190,10 @@ def zapisz_wszystkie_formaty(lista_wynikow, sciezka_baza):
 def glowna_petla_optymalizacyjna(router_instance=None):
     print("=== START OPTYMALIZATORA KONSTRUKCJI SŁUPA ===")
     
-    # Inicjalizacja Routera jeśli brak (dla uruchomienia standalone)
+    # --- POPRAWKA: Bezpieczniejsza obsługa routera
+    # Jeśli wywołujemy skrypt ręcznie (nie przez GUI), używamy domyślnego routera.
     if router_instance is None:
         router_instance = routing.router
-        if not router_instance.project_path:
-            router_instance.set_project() # Ustawia domyślny timestamp
 
     # Wymuszenie przeładowania konfiguracji (dla GUI)
     importlib.reload(config_solver)
@@ -240,13 +231,11 @@ def glowna_petla_optymalizacyjna(router_instance=None):
             continue
 
         dostepne_plaskowniki = material_catalogue.dostepne_plaskowniki(typ_mat)
-        lista_tp = sorted(dostepne_plaskowniki['tp']) # Posortowana ROSNĄCO [5, 6, 8...]
+        lista_tp = sorted(dostepne_plaskowniki['tp']) # Posortowana ROSNĄCO
         
         # Zmienne do globalnego stopu
-        masa_referencyjna_poprzedniego = None # Przechowuje masę wariantu MIN dla poprzedniego profilu
+        masa_referencyjna_poprzedniego = None
         licznik_wzrostu_masy = 0
-        
-        # Zmienna do zapamiętania optimum z poprzedniego profilu (indeks w liście tp)
         indeks_optimum_poprzedni = None
         
         # --- PĘTLA PO CEOWNIKACH (ROSNĄCO) ---
@@ -255,31 +244,24 @@ def glowna_petla_optymalizacyjna(router_instance=None):
             hc = upe_data['hc']
             
             # --- KROK 1: INTELIGENTNE USTALENIE STARTU ---
-            # Ustalamy górny limit grubości (sufit) dla przeszukiwania w dół
             global_max_gp = config_solver.MAX_GRUBOSC_PLASKOWNIKA
             
             if indeks_optimum_poprzedni is not None:
-                # Startujemy X oczek wyżej niż optimum poprzedniego profilu
                 start_index = indeks_optimum_poprzedni + config_solver.START_SEARCH_OFFSET
                 if start_index >= len(lista_tp): 
                     start_index = len(lista_tp) - 1
                 start_tp_value = lista_tp[start_index]
-                # Bierzemy mniejszą z (wyliczonej z offsetu, globalnego maxa)
                 current_start_limit = min(start_tp_value, global_max_gp)
             else:
                 current_start_limit = global_max_gp
 
-            # Lista do badania w dół: tylko <= limitowi
-            # Sortujemy malejąco, żeby znaleźć "pierwszy spełniający" (czyli najcieńszy)
             lista_tp_filtrowana = sorted([t for t in lista_tp if t <= current_start_limit], reverse=True)
             
             if not lista_tp_filtrowana:
                 continue
 
-            # --- KROK 2: SZUKANIE "DNA" (Minimalna grubość przy minimalnym otwarciu) ---
+            # --- KROK 2: SZUKANIE "DNA" ---
             tp_min = None
-            
-            # Iterujemy od najgrubszego w dół
             for tp_test in lista_tp_filtrowana:
                 b_otw = config_solver.MIN_SZEROKOSC_OTWARCIA
                 bp = b_otw + 2 * hc
@@ -288,18 +270,14 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 res = engine_solver.analizuj_przekroj_pelna_dokladnosc(upe_data, geo_data, load_full, config_solver.SAFETY_PARAMS)
                 
                 if res['Wskazniki']['UR'] <= 1.0 and res['Wskazniki']['Klasa_Przekroju'] <= 3:
-                    # Spełnia -> to jest kandydat na minimum. Idziemy dalej w dół.
                     tp_min = tp_test
                 else:
-                    # Nie spełnia -> Przerwij. Poprzedni (tp_min) był ostatnim dobrym.
                     break
             
             if tp_min is None:
-                # Nawet startowa (najgrubsza sprawdzana) nie dała rady -> profil za słaby
                 indeks_optimum_poprzedni = None
                 continue 
             
-            # Zapamiętujemy indeks minimum do następnej iteracji profilu
             try:
                 indeks_tp_min_w_pelnej_liscie = lista_tp.index(tp_min)
                 indeks_optimum_poprzedni = indeks_tp_min_w_pelnej_liscie
@@ -308,23 +286,15 @@ def glowna_petla_optymalizacyjna(router_instance=None):
 
             print(f"[ZNALEZIONO BAZĘ] {prof_nazwa}: Min grubość = {tp_min}mm")
 
-            # --- KROK 3: GENEROWANIE WYNIKÓW (Dla tp_min i N kroków w górę) ---
-            
-            # Zakres raportowania: od indeksu min w górę o zadaną liczbę kroków
+            # --- KROK 3: GENEROWANIE WYNIKÓW ---
             start_idx = indeks_tp_min_w_pelnej_liscie
-            end_idx = start_idx + config_solver.ILE_KROKOW_W_GORE + 1 # +1 bo range jest wyłączny, a chcemy włącznie
-            
-            # Pobieramy grubości z pełnej, posortowanej listy
+            end_idx = start_idx + config_solver.ILE_KROKOW_W_GORE + 1
             kandydaci_w_gore = lista_tp[start_idx : end_idx]
-            
-            # Ostateczne filtrowanie (opcjonalne, ale trzyma nas w ryzach configu)
             grubosci_do_analizy = [t for t in kandydaci_w_gore if t <= config_solver.MAX_GRUBOSC_PLASKOWNIKA]
 
-            # Rejestracja masy minimalnej dla tego profilu (dla tp_min) do stopu globalnego
             waga_referencyjna = 0.0
 
             for i_grubosc, tp_current in enumerate(grubosci_do_analizy):
-                
                 # === A) WYNIK DLA MINIMALNEGO OTWARCIA ===
                 b_otw_min = config_solver.MIN_SZEROKOSC_OTWARCIA
                 bp_min = b_otw_min + 2 * hc
@@ -333,7 +303,6 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 res_min = engine_solver.analizuj_przekroj_pelna_dokladnosc(upe_data, geo_min, load_full, config_solver.SAFETY_PARAMS)
                 waga_min = engine_solver.oblicz_mase_metra(upe_data, geo_min, load_full)
                 
-                # Zapisujemy wagę najlżejszego wariantu (tp_min)
                 if i_grubosc == 0:
                     waga_referencyjna = waga_min
 
@@ -344,7 +313,6 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 dane_min["Res_Masa_kg_m"] = waga_min
                 dane_min["Raport_Etap"] = f"1_MIN_GEO_{prof_nazwa}_tp{tp_current}"
                 
-                # Dodatki obliczeniowe
                 dane_min["Calc_Fy"] = load_full['Fx'] * load_full['w_Ty']
                 dane_min["Calc_Fz"] = load_full['Fx'] * load_full['w_Tz']
                 nb_rd = (dane_min.get("Res_Stab_Chi_N", 0) * dane_min.get("Res_Geo_Acal", 0) * load_full['Re']) / config_solver.SAFETY_PARAMS['gamma_M1']
@@ -353,12 +321,12 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 
                 zbieracz.lista_wierszy.append(dane_min)
                 
-                # === B) SZUKANIE MAKSYMALNEGO OTWARCIA (POSZERZANIE) ===
+                # === B) SZUKANIE MAKSYMALNEGO OTWARCIA ===
                 limit_otw = config_solver.LIMIT_POSZERZANIA * config_solver.MIN_SZEROKOSC_OTWARCIA
                 current_b_otw = config_solver.MIN_SZEROKOSC_OTWARCIA + config_solver.KROK_POSZERZANIA
                 
                 max_b_otw_found = config_solver.MIN_SZEROKOSC_OTWARCIA
-                ostatni_poprawny_wynik = res_min # Startujemy od wyniku dla min
+                ostatni_poprawny_wynik = res_min 
                 
                 while current_b_otw <= limit_otw:
                     bp_test = current_b_otw + 2 * hc
@@ -373,7 +341,6 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                     else:
                         break
                 
-                # Raportujemy wynik MAX, ale TYLKO JEŚLI udało się poszerzyć względem MIN
                 if max_b_otw_found > config_solver.MIN_SZEROKOSC_OTWARCIA:
                     waga_max = engine_solver.oblicz_mase_metra(upe_data, {"bp": max_b_otw_found + 2*hc, "tp": tp_current}, load_full)
                     dane_max = engine_solver.splaszcz_wyniki_do_wiersza(upe_data, {"bp": max_b_otw_found + 2*hc, "tp": tp_current}, load_full, config_solver.SAFETY_PARAMS, ostatni_poprawny_wynik)
@@ -395,7 +362,7 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                     if config_solver.POKAZUJ_KROKI_POSREDNIE:
                         print(f"   -> tp={tp_current}: Max Otwarcie {max_b_otw_found}mm")
 
-            # --- SPRAWDZENIE GLOBALNEGO STOPU (Na podstawie masy wariantu min) ---
+            # --- SPRAWDZENIE GLOBALNEGO STOPU ---
             if masa_referencyjna_poprzedniego is not None:
                 if waga_referencyjna > masa_referencyjna_poprzedniego:
                     licznik_wzrostu_masy += 1
@@ -408,7 +375,7 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 print(f"[INFO] Przerwano symulację: Masa minimalna rośnie przez {config_solver.MAX_N_WZROSTOW_WAGI} kolejne profile.")
                 break
 
-    # --- KONIEC I EKSPORT PRZEZ ROUTING ---
+    # --- KONIEC I EKSPORT ---
     
     if config_solver.NAZWA_BADANIA:
         nazwa_symulacji = config_solver.NAZWA_BADANIA
@@ -416,15 +383,14 @@ def glowna_petla_optymalizacyjna(router_instance=None):
         param_str = f"Fx{int(config_solver.LOAD_PARAMS['Fx'])}_L{int(config_solver.LOAD_PARAMS['L'])}"
         nazwa_symulacji = f"Symulacja_{param_str}"
     
-    # Używamy routera do określenia ścieżki zapisu w folderze "00_Analityka"
-    # Pobieramy ścieżkę BAZOWĄ (bez rozszerzenia, bo zapisz_wszystkie_formaty dodaje .csv/.html)
+    # Wykorzystujemy nowy router do ścieżki (bezpośrednio nazwę, bez rozszerzenia)
     sciezka_baza = router_instance.get_path("ANALYTICAL", nazwa_symulacji)
     
     print(f"\n=== KONIEC OBLICZEŃ. Zapisywanie do: {sciezka_baza}.* ===")
     
     zapisz_wszystkie_formaty(zbieracz.lista_wierszy, sciezka_baza)
     
-    # Zwracamy pełną ścieżkę do CSV, aby GUI mogło ją wczytać
+    # Zwracamy pełną ścieżkę do CSV
     return f"{sciezka_baza}.csv"
 
 if __name__ == "__main__":
