@@ -468,8 +468,9 @@ class FemWorker(QThread):
 # ==============================================================================
 
 class Tab1_Dashboard(QWidget):
-    def __init__(self):
+    def __init__(self, router_instance):  # <--- Dodano argument
         super().__init__()
+        self.router = router_instance     # <--- Dodano przypisanie
         self.profile_widgets = []
         self.init_ui()
 
@@ -1209,7 +1210,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         
         # Inicjalizacja zakładek
-        self.tab1 = Tab1_Dashboard()
+        self.tab1 = Tab1_Dashboard(self.router)
         self.tab2 = Tab2_Knowledge()
         self.tab3 = Tab3_Selector()
         self.tab4 = Tab4_Fem(self.router)
