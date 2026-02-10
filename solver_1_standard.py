@@ -7,7 +7,6 @@ import importlib
 # Dodaj katalog rodzica do ścieżki, żeby widzieć moduły główne (routing, engine_solver itp.)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import routing
 import engine_solver
 import config_solver
 import material_catalogue

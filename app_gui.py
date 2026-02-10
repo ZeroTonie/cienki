@@ -44,6 +44,7 @@ import material_catalogue
 import engine_solver
 import engine_geometry
 import ccx_preparer
+import routing
 
 # --- WIZUALIZACJA (Fail-safe) ---
 try:
@@ -400,23 +401,25 @@ class FemWorker(QThread):
                 mat_props = material_catalogue.baza_materialow().get(mat_name, {})
                 mat_p = { "name": mat_name, "E": mat_props.get('E', 210000), "nu": 0.3 }
                 
+                                
                 r = float(cand.get("Input_Load_F_promien", 0.0))
                 ys = float(cand.get("Res_Geo_Ys", 0.0))
-                # yc_global z geometrii
-                yc_glob = geo_p['yc_global'] 
                 
                 # Obliczenie momentów
                 Fy = float(cand.get("Calc_Fy", 0.0))
                 Fx = float(cand.get("Input_Load_Fx", 0.0))
+                Fz = float(cand.get("Calc_Fz", 0.0))
                 
                 load_p = {
                     "Fx": Fx,
                     "Fy": Fy,
-                    "Fz": float(cand.get("Calc_Fz", 0.0)),
-                    "Mx": Fy * (r + yc_glob - ys), # Ms = Fy * ramię_skrętne
+                    "Fz": Fz,
+                    # POPRAWKA: Moment skręcający (torsja) zgodny z analityką
+                    "Mx": Fz * (r - ys), 
                     "My": 0.0, 
                     "Mz": Fx * r # Moment gnący od Fx (mimośród)
                 }
+
 
                 ccx_preparer.generate_inp_file(job_name, inp_path, geo_results, mat_p, load_p, self.settings)
                 self.log_signal.emit(f"   [OK] Plik .inp gotowy.")
@@ -424,24 +427,20 @@ class FemWorker(QThread):
                 # --- 3. URUCHOMIENIE CALCULIX ---
                 self.log_signal.emit(f"3. Uruchamianie solvera CCX...")
                 ccx_path = os.path.join(os.getcwd(), "ccx", "ccx.exe")
-                if not os.path.exists(ccx_path):
-                    ccx_path = "ccx" # Fallback to PATH
+                if not os.path.exists(ccx_path): ccx_path = "ccx"
 
-                proc = subprocess.run(
-                    [ccx_path, "-i", job_name],
-                    cwd=fem_dir,
-                    capture_output=True, text=True, encoding='utf-8'
-                )
+                proc = subprocess.run([ccx_path, "-i", job_name], cwd=fem_dir, capture_output=True, text=True, encoding='utf-8', check=False)
 
                 if proc.returncode == 0:
                     self.log_signal.emit(f"   [OK] Obliczenia zakończone.")
                     success_count += 1
                 else:
                     self.log_signal.emit(f"   [BŁĄD] Kod błędu: {proc.returncode}")
-                    self.log_signal.emit(proc.stdout)
+                    self.log_signal.emit(proc.stdout) # Dodano stdout dla pełniejszej diagnostyki
                     self.log_signal.emit(proc.stderr)
                 
             except Exception as e:
+
                 self.log_signal.emit(f"!!! FEM ERROR: {str(e)}")
                 self.log_signal.emit(traceback.format_exc())
         
@@ -946,105 +945,288 @@ class Tab2_Knowledge(QWidget):
 # TAB 3: SELEKCJA (Filtr Kropka/Przecinek)
 # ==============================================================================
 
+class FilterWidget(QWidget):
+    def __init__(self, parent=None, columns=[]):
+        super().__init__(parent)
+        l = QHBoxLayout(self); l.setContentsMargins(0,2,0,2)
+        self.combo_col = QComboBox(); self.combo_col.addItems(columns); self.combo_col.setMinimumWidth(120)
+        self.inp_min = QLineEdit(); self.inp_min.setPlaceholderText("Min"); self.inp_min.setFixedWidth(60)
+        self.inp_max = QLineEdit(); self.inp_max.setPlaceholderText("Max"); self.inp_max.setFixedWidth(60)
+        btn = QPushButton("X"); btn.setFixedWidth(25); btn.setStyleSheet("background:#802020; font-weight:bold;")
+        btn.clicked.connect(self.deleteLater)
+        l.addWidget(self.combo_col); l.addWidget(self.inp_min); l.addWidget(self.inp_max); l.addWidget(btn)
+
 class Tab3_Selector(QWidget):
     request_transfer = pyqtSignal(list)
     def __init__(self):
         super().__init__()
-        l = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
         
         # Toolbar
-        h = QHBoxLayout()
+        toolbar_layout = QHBoxLayout()
         b_load = QPushButton("📂 Wczytaj CSV"); b_load.clicked.connect(lambda: self.load_csv())
         
         lbl_hint = QLabel("💡 Filtry obsługują kropkę (.) i przecinek (,)")
         lbl_hint.setStyleSheet("color: #aaa; font-style: italic; margin-left: 15px;")
         
         b_send = QPushButton("PRZEKAŻ DO ANALIZY MES ➡️")
+                
+                r = float(cand.get("Input_Load_F_promien", 0.0))
+                ys = float(cand.get("Res_Geo_Ys", 0.0))
+                
+                # Obliczenie momentów
+                Fy = float(cand.get("Calc_Fy", 0.0))
+                Fx = float(cand.get("Input_Load_Fx", 0.0))
+                Fz = float(cand.get("Calc_Fz", 0.0))
+                
+                load_p = {
+                    "Fx": Fx,
+                    "Fy": Fy,
+                    "Fz": Fz,
+                    # POPRAWKA: Moment skręcający (torsja) zgodny z analityką
+                    "Mx": Fz * (r - ys), 
+                    "My": 0.0, 
+                    "Mz": Fx * r # Moment gnący od Fx (mimośród)
+                }
+                ccx_path = os.path.join(os.getcwd(), "ccx", "ccx.exe")
+                if not os.path.exists(ccx_path): ccx_path = "ccx"
+
+                proc = subprocess.run([ccx_path, "-i", job_name], cwd=fem_dir, capture_output=True, text=True, encoding='utf-8', check=False)
+
+                if proc.returncode == 0:
+                    self.log_signal.emit(f"   [OK] Obliczenia zakończone.")
+                    success_count += 1
+                else:
+                    self.log_signal.emit(f"   [BŁĄD] Kod błędu: {proc.returncode}")
+                    self.log_signal.emit(proc.stdout) # Dodano stdout dla pełniejszej diagnostyki
+                    self.log_signal.emit(proc.stderr)
+                
+            except Exception as e:
+    
+    request_transfer = pyqtSignal(list)
+    def __init__(self):
+        super().__init__()
+        main_layout = QVBoxLayout(self)
+        
+        # Toolbar
+        toolbar_layout = QHBoxLayout()
+        b_load = QPushButton("📂 Wczytaj CSV"); b_load.clicked.connect(lambda: self.load_csv())
+        
+        lbl_hint = QLabel("💡 Filtry obsługują kropkę (.) i przecinek (,)")
         b_send.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 8px 15px;")
         b_send.clicked.connect(self.send)
         
-        h.addWidget(b_load); h.addWidget(lbl_hint); h.addStretch(); h.addWidget(b_send)
-        l.addLayout(h)
+        toolbar_layout.addWidget(b_load)
+        toolbar_layout.addWidget(lbl_hint)
+        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(b_send)
+        main_layout.addLayout(toolbar_layout)
         
         # Splitter
-        spl = QSplitter()
-        l.addWidget(spl)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(splitter)
         
-        # Panel filtrów
-        w_fil = QWidget(); l_fil = QVBoxLayout(w_fil)
-        self.area_fil = QVBoxLayout(); self.area_fil.setAlignment(Qt.AlignmentFlag.AlignTop)
-        l_fil.addLayout(self.area_fil)
+        # --- PRZYWRÓCONY PANEL FILTRÓW ---
+        # --- PANEL FILTRÓW ---
+        filter_panel = QWidget()
+        filter_layout = QVBoxLayout(filter_panel)
+        filter_panel.setMaximumWidth(300)
         
-        b_addf = QPushButton("+ Dodaj Filtr"); b_addf.clicked.connect(self.add_fil)
-        b_apply = QPushButton("Zastosuj Filtry"); b_apply.clicked.connect(self.apply)
-        self.chk_hidden = QCheckBox("Pokaż ukryte (WYKLUCZ)"); self.chk_hidden.setChecked(True); self.chk_hidden.clicked.connect(self.apply)
+        # Kontener na dynamiczne filtry
+        scroll_filters = QScrollArea(); scroll_filters.setWidgetResizable(True)
+        filter_content = QWidget(); self.filter_area_layout = QVBoxLayout(filter_content)
+        self.filter_area_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_filters.setWidget(filter_content)
         
-        l_fil.addWidget(b_addf); l_fil.addWidget(self.chk_hidden); l_fil.addWidget(b_apply)
+        # Przyciski
+        btn_add_filter = QPushButton("+ Dodaj Filtr"); btn_add_filter.clicked.connect(self.add_filter_widget)
+        btn_apply_filters = QPushButton("✅ Zastosuj Filtry"); btn_apply_filters.clicked.connect(self.apply_filters)
+        self.chk_show_excluded = QCheckBox("Pokaż ukryte (WYKLUCZ)"); self.chk_show_excluded.setChecked(True)
+        self.chk_show_excluded.stateChanged.connect(self.apply_filters)
         
-        # Masowe
-        g_mass = QGroupBox("Masowe Zaznaczanie")
-        lm = QVBoxLayout(g_mass)
-        h1 = QHBoxLayout(); b1=QPushButton("All FEM"); b1.clicked.connect(lambda: self.bulk("PRZEKAZ",1)); b2=QPushButton("No FEM"); b2.clicked.connect(lambda: self.bulk("PRZEKAZ",0)); h1.addWidget(b1); h1.addWidget(b2)
-        h2 = QHBoxLayout(); b3=QPushButton("All Hide"); b3.clicked.connect(lambda: self.bulk("WYKLUCZ",1)); b4=QPushButton("No Hide"); b4.clicked.connect(lambda: self.bulk("WYKLUCZ",0)); h2.addWidget(b3); h2.addWidget(b4)
-        lm.addLayout(h1); lm.addLayout(h2)
-        l_fil.addWidget(g_mass); l_fil.addStretch()
+        filter_layout.addWidget(scroll_filters)
+        filter_layout.addWidget(btn_add_filter)
+        filter_layout.addWidget(self.chk_show_excluded)
+        filter_layout.addWidget(btn_apply_filters)
         
-        spl.addWidget(w_fil)
+        filter_layout.addStretch()
+        splitter.addWidget(filter_panel)
         
         # Tabela
-        self.tab = QTableView(); self.head = CustomHeaderView(); self.tab.setHorizontalHeader(self.head)
+        self.tab = QTableView()
+        self.head = CustomHeaderView()
+        self.tab.setHorizontalHeader(self.head)
         self.tab.setAlternatingRowColors(True)
-        spl.addWidget(self.tab)
+        splitter.addWidget(self.tab)
         
         # Detale
         self.det = QTextBrowser()
-        spl.addWidget(self.det)
-        spl.setSizes([250, 800, 300])
+        splitter.addWidget(self.det)
+        splitter.setSizes([250, 800, 300])
 
     def load_csv(self, path=None):
         if not path: path, _ = QFileDialog.getOpenFileName(self, "CSV", "", "*.csv")
+        if not path: path, _ = QFileDialog.getOpenFileName(self, "Wczytaj plik CSV", "", "*.csv")
         if path:
             try:
                 df = pd.read_csv(path)
+                # Wyczyść stare filtry
+                while self.filter_area_layout.count():
+                    child = self.filter_area_layout.takeAt(0)
+                    if child.widget(): child.widget().deleteLater()
+
                 self.model = AdvancedPandasModel(df)
                 self.tab.setModel(self.model)
                 self.cols = list(df.columns)
-                self.tab.selectionModel().currentChanged.connect(self.click)
+                self.tab.selectionModel().currentChanged.connect(self.on_table_click)
             except Exception as e: QMessageBox.critical(self, "Błąd", str(e))
+            except Exception as e: QMessageBox.critical(self, "Błąd wczytywania CSV", str(e))
 
-    def add_fil(self): 
-        if hasattr(self, 'cols'): self.area_fil.addWidget(FilterWidget(columns=self.cols))
+    def add_filter_widget(self): 
+        if hasattr(self, 'cols'):
+            self.filter_area_layout.addWidget(FilterWidget(columns=self.cols))
 
-    def apply(self):
+    def apply_filters(self):
         if not hasattr(self, 'model'): return
-        fs = []
-        for i in range(self.area_fil.count()):
-            w = self.area_fil.itemAt(i).widget()
+        filters = []
+        for i in range(self.filter_area_layout.count()):
+            w = self.filter_area_layout.itemAt(i).widget()
             if isinstance(w, FilterWidget):
                 col = w.combo_col.currentText()
-                # Obsługa przecinka
                 mn_s = w.inp_min.text().replace(',', '.')
                 mx_s = w.inp_max.text().replace(',', '.')
                 mn = float(mn_s) if mn_s else None
                 mx = float(mx_s) if mx_s else None
-                fs.append((col, mn, mx))
-        self.model.apply_advanced_filter(fs, self.chk_hidden.isChecked())
+                col, mn, mx = w.get_values()
+                filters.append((col, mn, mx))
+        self.model.apply_advanced_filter(filters, self.chk_show_excluded.isChecked())
 
-    def bulk(self, col, val):
-        if hasattr(self, 'model'): self.model.toggle_column_all(col)
-
-    def click(self, c, p):
-        if not c.isValid(): return
-        r = self.model._df.iloc[c.row()]
-        t = "<h3>Szczegóły</h3>"
-        for k, v in r.items(): t += f"<b>{k}:</b> {v}<br>"
+    def on_table_click(self, current, previous):
+        if not current.isValid() or not hasattr(self, 'model'): return
+        
+        # Podświetlenie krzyżowe
+        self.model.set_highlight(current.row(), current.column())
+        
+        # Detale
+        r = self.model._df.iloc[current.row()]
+        t = f"<h3>Szczegóły Wiersza #{current.row()}</h3><table style='width:100%;'>"
+        html = f"<h3>Szczegóły Wiersza #{current.row()}</h3><table style='width:100%;'>"
+        for k, v in r.items():
+            val_str = f"{v:.4f}" if isinstance(v, (float, np.floating)) else str(v)
+            t += f"<tr><td style='font-weight:bold; padding-right:10px;'>{k}:</td><td>{val_str}</td></tr>"
+        t += "</table>"
         self.det.setHtml(t)
+            html += f"<tr><td style='font-weight:bold; padding-right:10px;'>{k}:</td><td>{val_str}</td></tr>"
+        html += "</table>"
+        self.det.setHtml(html)
+
+    def send(self):
+        if not hasattr(self, 'model'): return
+        super().__init__(Qt.Orientation.Horizontal)
+        self.router = router_instance
+        self.candidates = []
+        self.plotter = None # Dla podglądu 3D
+        self.init_ui()
+
+    def init_ui(self):
+        # --- LEWA KOLUMNA: KANDYDACI I USTAWIENIA ---
+        left_widget = QWidget()
+        left_widget.setMaximumWidth(450)
+        
+        # 1. Kandydaci
+        g_cand = QGroupBox("1. Kandydaci do analizy")
+        l_cand = QVBoxLayout(g_cand)
+        self.list_candidates = QListWidget(); self.list_candidates.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list_candidates.setStyleSheet("background-color: #1e1e1e;"); self.list_candidates.setMinimumHeight(150)
+        l_cand.addWidget(self.list_candidates)
+        left_layout.addWidget(g_cand)
+
+        left_layout.addStretch()
+        self.addWidget(left_widget)
+
+        # --- PRAWA STRONA: WIZUALIZACJA I LOGI (NOWY UKŁAD) ---
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # 1. Panel wizualizacji 3D
+        vis_panel = QGroupBox("Podgląd Geometrii i Siatki")
+        vis_layout = QVBoxLayout(vis_panel)
+        vis_layout.setContentsMargins(2, 2, 2, 2)
+        if HAS_PYVISTA:
+            self.plotter = QtInteractor(vis_panel)
+            vis_layout.addWidget(self.plotter.interactor)
+        else:
+            lbl_no_pv = QLabel("Biblioteka PyVista/PyVistaQt nie jest zainstalowana.\nPodgląd 3D jest niedostępny.")
+            lbl_no_pv.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vis_layout.addWidget(lbl_no_pv)
+        right_splitter.addWidget(vis_panel)
+
+        # 2. Panel logów i przycisku
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+
+        self.btn_run = QPushButton("🚀 URUCHOM GENERATOR I SOLVER")
+        self.btn_run.setFixedHeight(50)
+        self.btn_run.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; font-size: 16px;")
+        self.btn_run.clicked.connect(self.run_fem_batch)
+
+        self.console = QTextBrowser()
+        self.console.setStyleSheet("background:#1e1e1e; color:#ddd; font-family:Consolas; font-size:12px;")
+
+        log_layout.addWidget(self.btn_run)
+        log_layout.addWidget(QLabel("<b>Logi Procesu FEM:</b>"))
+        log_layout.addWidget(self.console)
+        log_widget.setMinimumHeight(200)
+        right_splitter.addWidget(log_widget)
+
+        right_splitter.setSizes([600, 250])
+        self.addWidget(right_splitter)
+
+    def receive_data(self, candidates):
+        self.candidates = candidates
+        tp = cand.get('Input_Geo_tp', '?')
+        self.list_candidates.addItem(f"{prof} + Płaskownik {tp}mm")
+
+    def run_fem_batch(self):
+        if not self.candidates: return
+        
+        settings = {
+
+        self.worker = FemWorker(self.candidates, settings, self.router)
+        self.worker.log_signal.connect(self.console.append)
+        self.worker.preview_signal.connect(self.update_preview)
+        self.worker.finished_signal.connect(lambda s: self.btn_run.setEnabled(True))
+        
+        self.btn_run.setEnabled(False)
+        self.console.clear()
+        if self.plotter: self.plotter.clear()
+        self.worker.start()
+
+    def update_preview(self, geo_results):
+        if not HAS_PYVISTA or not self.plotter:
+            return
+        
+        stl_path = geo_results.get("stl_file")
+        if stl_path and os.path.exists(stl_path):
+            try:
+                import pyvista as pv
+                mesh = pv.read(stl_path)
+                self.plotter.add_mesh(mesh, color='c', show_edges=True, edge_color='#333333', line_width=0.5)
+                self.plotter.add_axes()
+                self.plotter.view_isometric()
+            except Exception as e:
+                self.console.append(f"   [VIS-BŁĄD] Nie udało się załadować podglądu 3D: {e}")
+# ==============================================================================
+# GŁÓWNE OKNO
+# ==============================================================================
+
+
 
     def send(self):
         if not hasattr(self, 'model'): return
         sel = self.model._df[self.model._df["PRZEKAZ"]==True].to_dict('records')
         if sel: self.request_transfer.emit(sel)
         else: QMessageBox.warning(self, "Info", "Brak zaznaczonych wierszy w kolumnie PRZEKAZ.")
+        else: QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz przynajmniej jeden wiersz w kolumnie 'MES', aby przekazać dane.")
 
 class FilterWidget(QWidget):
     def __init__(self, parent=None, columns=[]):
@@ -1064,8 +1246,7 @@ class Tab4_Fem(QSplitter):
         super().__init__(Qt.Orientation.Horizontal)
         self.router = router_instance
         self.candidates = []
-        self.plotter = None
-        self.surface_actors = {}
+        self.plotter = None # Dla podglądu 3D
         self.init_ui()
 
     def init_ui(self):
@@ -1076,11 +1257,10 @@ class Tab4_Fem(QSplitter):
         left_widget.setMaximumWidth(450)
         
         # 1. Kandydaci
-        g_cand = QGroupBox("1. Kandydaci do analizy (z Tab 3)")
+        g_cand = QGroupBox("1. Kandydaci do analizy")
         l_cand = QVBoxLayout(g_cand)
-        self.list_candidates = QListWidget()
-        self.list_candidates.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.list_candidates.setStyleSheet("background-color: #1e1e1e;")
+        self.list_candidates = QListWidget(); self.list_candidates.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.list_candidates.setStyleSheet("background-color: #1e1e1e;"); self.list_candidates.setMinimumHeight(150)
         l_cand.addWidget(self.list_candidates)
         left_layout.addWidget(g_cand)
 
@@ -1109,15 +1289,30 @@ class Tab4_Fem(QSplitter):
         left_layout.addStretch()
         self.addWidget(left_widget)
 
-        # --- PRAWA STRONA: LOGI ---
-        # (Wizualizację można dodać później, skupiamy się na generatorze)
-        log_panel = QWidget()
-        log_layout = QVBoxLayout(log_panel)
+        # --- PRAWA STRONA: WIZUALIZACJA I LOGI (NOWY UKŁAD) ---
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # 1. Panel wizualizacji 3D
+        vis_panel = QGroupBox("Podgląd Geometrii i Siatki")
+        vis_layout = QVBoxLayout(vis_panel)
+        vis_layout.setContentsMargins(2, 2, 2, 2)
+        if HAS_PYVISTA:
+            self.plotter = QtInteractor(vis_panel)
+            vis_layout.addWidget(self.plotter.interactor)
+        else:
+            lbl_no_pv = QLabel("Biblioteka PyVista/PyVistaQt nie jest zainstalowana.\nPodgląd 3D jest niedostępny.")
+            lbl_no_pv.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vis_layout.addWidget(lbl_no_pv)
+        right_splitter.addWidget(vis_panel)
+
+        # 2. Panel logów i przycisku
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
 
         self.btn_run = QPushButton("🚀 URUCHOM GENERATOR I SOLVER")
         self.btn_run.setFixedHeight(50)
         self.btn_run.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; font-size: 16px;")
-        self.btn_run.clicked.connect(self.run_batch)
+        self.btn_run.clicked.connect(self.run_fem_batch)
 
         self.console = QTextBrowser()
         self.console.setStyleSheet("background:#1e1e1e; color:#ddd; font-family:Consolas; font-size:12px;")
@@ -1125,9 +1320,11 @@ class Tab4_Fem(QSplitter):
         log_layout.addWidget(self.btn_run)
         log_layout.addWidget(QLabel("<b>Logi Procesu FEM:</b>"))
         log_layout.addWidget(self.console)
+        log_widget.setMinimumHeight(200)
+        right_splitter.addWidget(log_widget)
 
-        self.addWidget(log_panel)
-        self.setSizes([400, 800])
+        right_splitter.setSizes([600, 250])
+        self.addWidget(right_splitter)
 
     def receive_data(self, candidates):
         self.candidates = candidates
@@ -1141,35 +1338,54 @@ class Tab4_Fem(QSplitter):
             prof = cand.get('Nazwa_Profilu', '?')
             tp = cand.get('Input_Geo_tp', '?')
             self.list_candidates.addItem(f"{prof} + Płaskownik {tp}mm")
+        for c in candidates: self.list_candidates.addItem(f"{c.get('Nazwa_Profilu')} tp={c.get('Input_Geo_tp')}")
 
-    def run_batch(self):
+    def run_fem_batch(self):
         if not self.candidates: return
         
         settings = {
             "mesh_size_factor": self.inp_mesh_factor.value(),
             "mesh_order": 2 if "2" in self.inp_mesh_order.currentText() else 1,
+            "mesh_order": 2 if self.inp_mesh_order.currentIndex() == 1 else 1,
             "mesh_cores": self.inp_mesh_cores.value(),
             "solver_cores": self.inp_solver_cores.value()
         }
 
         self.worker = FemWorker(self.candidates, settings, self.router)
         self.worker.log_signal.connect(self.console.append)
-        # self.worker.preview_signal.connect(...) # Opcjonalnie
+        self.worker.preview_signal.connect(self.update_preview)
         self.worker.finished_signal.connect(lambda s: self.btn_run.setEnabled(True))
         
         self.btn_run.setEnabled(False)
         self.console.clear()
+        if self.plotter: self.plotter.clear()
         self.worker.start()
 
+    def update_preview(self, geo_results):
+        if not HAS_PYVISTA or not self.plotter:
+            return
+        
+        stl_path = geo_results.get("stl_file")
+        if stl_path and os.path.exists(stl_path):
+            try:
+                import pyvista as pv
+                mesh = pv.read(stl_path)
+                self.plotter.add_mesh(mesh, color='c', show_edges=True, edge_color='#333333', line_width=0.5)
+                self.plotter.add_axes()
+                self.plotter.view_isometric()
+            except Exception as e:
+                self.console.append(f"   [VIS-BŁĄD] Nie udało się załadować podglądu 3D: {e}")
 # ==============================================================================
 # GŁÓWNE OKNO
 # ==============================================================================
 
 class MainWindow(QMainWindow):
     def __init__(self):
+    def __init__(self, router_instance):
         super().__init__()
         self.setWindowTitle("System Optymalizacji Słupa v7.1 (Final)")
         self.resize(1280, 800) # Bezpieczny rozmiar
+        self.router = router_instance
         
         self.router = router
         
@@ -1225,6 +1441,9 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     
+    # Inicjalizacja routera
+    router = routing.router
+    
     # Ciemny motyw
     p = QPalette()
     p.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
@@ -1257,6 +1476,7 @@ if __name__ == "__main__":
         print(f"[MAIN] Warning: Gmsh init failed: {e}")
 
     w = MainWindow()
+    w = MainWindow(router)
     w.show()
     
     # Czyste zamknięcie aplikacji
