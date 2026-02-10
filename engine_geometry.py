@@ -5,8 +5,8 @@ import math
 
 def calculate_cog(dim, tags):
     """
-    Oblicza środek ciężkości (Center of Gravity) dla grupy obiektów.
-    Wykorzystuje silnik OCC do ważenia powierzchni masą (polem).
+    Oblicza rzeczywisty środek ciężkości (Center of Gravity) dla grupy obiektów (powierzchni).
+    Używa kernela OpenCascade do ważenia masą (polem powierzchni).
     """
     total_area = 0.0
     moment_x = 0.0
@@ -25,12 +25,11 @@ def calculate_cog(dim, tags):
             moment_y += com[1] * mass
             moment_z += com[2] * mass
         except Exception as e:
-            # Fallback: W rzadkim przypadku błędu OCC używamy środka BoundingBox
-            # (mniej dokładne dla niesymetrycznych kształtów, ale bezpieczne)
-            print(f"[Warning] COG calculation fallback for tag {tag}: {e}")
+            # Fallback: Jeśli OCC zawiedzie (rzadkie), używamy BoundingBox
+            # print(f"[Geometry Warning] COG calculation fallback for tag {tag}: {e}")
             bb = gmsh.model.getBoundingBox(dim, tag)
             cx, cy, cz = (bb[0]+bb[3])/2, (bb[1]+bb[4])/2, (bb[2]+bb[5])/2
-            # Aproksymacja: dodajemy jako wagę 1.0 (średnia arytmetyczna)
+            # Aproksymacja: waga 1.0
             total_area += 1.0
             moment_x += cx
             moment_y += cy
@@ -43,11 +42,16 @@ def calculate_cog(dim, tags):
 
 def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     """
-    Generuje geometrię i siatkę w GMSH dla słupa złożonego.
-    Punkty referencyjne liczone dynamicznie ze środków ciężkości powierzchni.
+    Generuje geometrię i siatkę w GMSH.
+    - Układ: YZ (Przekrój), X (Długość).
+    - Punkt (0,0,0) w geometrycznym środku płaskownika na utwierdzeniu.
+    - Punkty referencyjne (RP) liczone dynamicznie z COG powierzchni.
     """
     
-    gmsh.initialize()
+    # Bezpieczna inicjalizacja (sprawdza czy już nie działa)
+    if not gmsh.isInitialized():
+        gmsh.initialize()
+    
     gmsh.model.add(job_name)
     occ = gmsh.model.occ
     
@@ -59,9 +63,9 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     bc = geometry_params['bc']
     twc = geometry_params['twc']
     tfc = geometry_params['tfc']
-    # yc_global - odległość COG od góry płaskownika
-    yc_global = geometry_params['yc_global'] 
-
+    # yc_global (z analityki) nie jest tu krytyczny dla geometrii, bo centrujemy geometrycznie,
+    # ale może się przydać do weryfikacji.
+    
     # Parametry siatki
     base_mesh_size = min(tp, twc, tfc) * mesh_params.get('mesh_size_factor', 1.0)
 
@@ -69,15 +73,15 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     # 2. TWORZENIE PRZEKROJU 2D (Płaszczyzna YZ, X=0)
     # --------------------------------------------------------------------------
     # A. Płaskownik
+    # Prostokąt: Y od 0 do tp, Z od -bp/2 do bp/2
     tag_flat = occ.addRectangle(0, 0, -bp/2, 0, tp, bp)
     
     # B. Ceowniki
-    # Rozstaw zew. środników = bp
     z_web_inner = bp/2 - twc
     y_top = 0
     y_bot = -hc
     
-    # Budowa Ceownika 1 (Prawy)
+    # Ceownik 1 (Prawy)
     web1 = occ.addRectangle(0, y_bot, z_web_inner, 0, hc, twc)
     flange_top1 = occ.addRectangle(0, y_top - tfc, z_web_inner - (bc-twc), 0, tfc, bc-twc)
     flange_bot1 = occ.addRectangle(0, y_bot, z_web_inner - (bc-twc), 0, tfc, bc-twc)
@@ -85,22 +89,20 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     c1_fused, _ = occ.fuse([(2, web1)], [(2, flange_top1), (2, flange_bot1)])
     tag_c1 = c1_fused[0][1]
     
-    # C. Ceownik 2 (Lewy - Lustro)
+    # Ceownik 2 (Lewy - Lustro)
     c2_copy = occ.copy([(2, tag_c1)])
-    occ.mirror(c2_copy, 0, 0, 0, 0, 0, 1)
+    occ.mirror(c2_copy, 0, 0, 0, 0, 0, 1) # Lustro względem płaszczyzny XY
     tag_c2 = c2_copy[0][1]
 
     # --------------------------------------------------------------------------
     # 3. POZYCJONOWANIE (Centrowanie Płaskownika w Y=0)
     # --------------------------------------------------------------------------
-    # Zgodnie z życzeniem, punkt (0,0,0) ma być w geometrycznym środku płaskownika na utwierdzeniu.
-    # Płaskownik ma Y od 0 do tp. Jego środek to tp/2.
-    # Przesuwamy wszystko w dół o tp/2.
-    
+    # Płaskownik jest w Y [0, tp]. Jego środek to tp/2.
+    # Przesuwamy w dół o tp/2, aby środek płaskownika był w Y=0.
     dy_shift = -tp / 2.0
     occ.translate([(2, tag_flat), (2, tag_c1), (2, tag_c2)], 0, dy_shift, 0)
     
-    # Poziom styku (potrzebny do detekcji powierzchni)
+    # Zapamiętujemy poziom styku (styk był na 0, teraz jest na dy_shift)
     y_contact_level = dy_shift
 
     # --------------------------------------------------------------------------
@@ -117,7 +119,7 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     occ.synchronize()
 
     # --------------------------------------------------------------------------
-    # 5. FRAGMENTACJA
+    # 5. FRAGMENTACJA (Spójna Siatka)
     # --------------------------------------------------------------------------
     input_volumes = [(3, v_flat_tag), (3, v_c1_tag), (3, v_c2_tag)]
     occ.fragment(input_volumes, input_volumes)
@@ -158,14 +160,15 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
                 if cz > eps: surfaces_map["CONTACT_C1_Z_POS"].append(tag)
                 elif cz < -eps: surfaces_map["CONTACT_C2_Z_NEG"].append(tag)
                 
-        # 4. Góra Płaskownika
+        # 4. Góra Płaskownika (Y = y_contact + tp)
         elif abs(cy - (y_contact_level + tp)) < eps:
             surfaces_map["FLATBAR_TOP"].append(tag)
             
-        # 5. Środniki
+        # 5. Środniki (Zew. pionowe, Z = +/- bp/2)
         elif abs(abs(cz) - bp/2) < eps:
             surfaces_map["WEB_SURFACES"].append(tag)
 
+    # Rejestracja grup
     for name, tags in surfaces_map.items():
         if tags: gmsh.model.addPhysicalGroup(2, tags, name=name)
         
@@ -176,9 +179,7 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     # --------------------------------------------------------------------------
     # 7. OBLICZANIE PUNKTÓW REFERENCYJNYCH (COG)
     # --------------------------------------------------------------------------
-    # Tutaj dzieje się magia: zamiast zgadywać (0,0,0), pytamy geometrię,
-    # gdzie dokładnie leży środek ciężkości wyciętych powierzchni.
-    
+    # Obliczamy faktyczny środek ciężkości powierzchni utwierdzenia i obciążenia
     rp_support = calculate_cog(2, surfaces_map["SUPPORT_FACE"])
     rp_load = calculate_cog(2, surfaces_map["LOAD_FACE"])
     
@@ -196,13 +197,16 @@ def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
     msh_path = os.path.join(output_dir, f"{job_name}.msh")
     gmsh.write(msh_path)
     
+    # STL do podglądu w GUI
     stl_path = os.path.join(output_dir, f"{job_name}_vis.stl")
     gmsh.write(stl_path)
+    
+    # Nie zamykamy gmsh.finalize(), bo ccx_preparer może chcieć skorzystać z API
+    # w tym samym procesie, lub GUI może chcieć coś wyświetlić.
     
     return {
         "msh_file": msh_path,
         "stl_file": stl_path,
-        # Zwracamy obliczone COG jako punkty referencyjne
-        "ref_point_support": rp_support,
+        "ref_point_support": rp_support, # (x, y, z) wyliczone z COG
         "ref_point_load": rp_load
     }
