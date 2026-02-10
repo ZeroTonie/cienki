@@ -1,246 +1,323 @@
 import gmsh
 import sys
 import os
+import json
+import csv
 import math
 
-def calculate_cog(dim, tags):
-    """
-    Oblicza rzeczywisty środek ciężkości (Center of Gravity) dla grupy obiektów.
-    """
-    total_area = 0.0
-    moment_x = 0.0
-    moment_y = 0.0
-    moment_z = 0.0
-    
-    for tag in tags:
+class GeometryGenerator:
+    def __init__(self, logger_callback=None):
+        self.logger = logger_callback
+
+    def log(self, message):
+        msg = f"[GEOM] {message}"
+        if self.logger: self.logger(msg)
+        else: print(msg)
+
+    def _prepare_gmsh(self):
         try:
-            mass = gmsh.model.occ.getMass(dim, tag)
-            com = gmsh.model.occ.getCenterOfMass(dim, tag)
+            if not gmsh.isInitialized(): gmsh.initialize()
+            gmsh.clear()
+            gmsh.option.setNumber("General.Terminal", 0)
+            gmsh.option.setNumber("Geometry.Tolerance", 1e-4) 
+            gmsh.option.setNumber("Geometry.OCCAutoFix", 1)
+        except: pass
+
+    def _finalize_gmsh(self):
+        # Nie zamykamy całkowicie gmsh.finalize(), bo w multiprocessing może to powodować problemy przy restarcie,
+        # ale gmsh.clear() w _prepare robi robotę.
+        pass
+
+    def _get_nodes_manual(self, xmin, ymin, zmin, xmax, ymax, zmax):
+        """
+        Pobiera węzły w zadanym prostopadłościanie (Bounding Box).
+        Filtrowanie odbywa się w Pythonie, co jest bardziej niezawodne niż Physical Groups dla węzłów w API.
+        """
+        node_tags, coords, _ = gmsh.model.mesh.getNodes()
+        selected_tags = []
+        count = len(node_tags)
+        
+        # coords to płaska lista [x1, y1, z1, x2, y2, z2...]
+        # Iterujemy i sprawdzamy warunki
+        for i in range(count):
+            x = coords[3*i]
+            y = coords[3*i+1]
+            z = coords[3*i+2]
             
-            total_area += mass
-            moment_x += com[0] * mass
-            moment_y += com[1] * mass
-            moment_z += com[2] * mass
+            if (xmin <= x <= xmax) and (ymin <= y <= ymax) and (zmin <= z <= zmax):
+                selected_tags.append(int(node_tags[i]))
+                
+        return selected_tags
+
+    def _apply_refinement(self, zones, global_lc, p_data, pl_data, length):
+        """Aplikuje pola zagęszczania siatki (Fields) na podstawie stref z GUI."""
+        if not zones: return
+
+        # Wymiary do interpretacji nazw stref
+        tp = float(pl_data['tp'])
+        bp = float(pl_data['bp'])
+        hc = float(p_data['hc'])
+        
+        field_ids = []
+        
+        for i, zone in enumerate(zones):
+            name = zone.get("name", "Unknown")
+            lc_min = float(zone.get("lc_min", global_lc))
+            lc_max = float(zone.get("lc_max", global_lc))
+            # Distances w Box Field działają jako Thickness (strefa przejścia)
+            dist_max = float(zone.get("dist_max", 10.0))
+            
+            # Domyślny Box (ogromny, nic nie łapie)
+            ymin, ymax, zmin, zmax = -9999, -9999, -9999, -9999
+            
+            if name == "SURF_WEBS":
+                # Obszar środników ceowników (Y > tp/2)
+                # Obejmujemy od poziomu płaskownika w górę
+                ymin = tp/2.0 - 5.0
+                ymax = tp/2.0 + hc + 5.0
+                # Z - pełna szerokość
+                zmin, zmax = -bp*2, bp*2 
+                
+            elif name == "SURF_FLANGES":
+                # Strefa stopek - upraszczamy do boxa obejmującego górę i dół ceownika
+                # Bardziej precyzyjnie byłoby 2 boxy, ale jeden duży też zadziała
+                ymin = tp/2.0 - 2.0
+                ymax = tp/2.0 + hc + 2.0
+                zmin, zmax = -bp*2, bp*2
+                
+            elif name == "SURF_PLATE":
+                # Płaskownik
+                ymin = -tp/2.0 - 5.0
+                ymax = tp/2.0 + 5.0
+                zmin, zmax = -bp*2, bp*2
+            
+            # Tworzenie pola Box
+            fid_box = gmsh.model.mesh.field.add("Box")
+            gmsh.model.mesh.field.setNumber(fid_box, "VIn", lc_min)
+            gmsh.model.mesh.field.setNumber(fid_box, "VOut", lc_max)
+            gmsh.model.mesh.field.setNumber(fid_box, "XMin", -10.0)
+            gmsh.model.mesh.field.setNumber(fid_box, "XMax", length + 10.0)
+            gmsh.model.mesh.field.setNumber(fid_box, "YMin", ymin)
+            gmsh.model.mesh.field.setNumber(fid_box, "YMax", ymax)
+            gmsh.model.mesh.field.setNumber(fid_box, "ZMin", zmin)
+            gmsh.model.mesh.field.setNumber(fid_box, "ZMax", zmax)
+            # Grubosc przejscia (gradientu siatki)
+            gmsh.model.mesh.field.setNumber(fid_box, "Thickness", dist_max) 
+            
+            field_ids.append(fid_box)
+
+        if field_ids:
+            # Używamy pola Min, aby wziąć najmniejszą wartość z wielu pól (intersekcja wymagań)
+            fid_min = gmsh.model.mesh.field.add("Min")
+            gmsh.model.mesh.field.setNumbers(fid_min, "FieldsList", field_ids)
+            gmsh.model.mesh.field.setAsBackgroundMesh(fid_min)
+            self.log(f"Zaaplikowano {len(field_ids)} pól zagęszczania.")
+
+    def generate_model(self, params):
+        self._prepare_gmsh()
+        try:
+            sys_res = params.get('system_resources', {})
+            gmsh.option.setNumber("General.NumThreads", int(sys_res.get('num_threads', 4)))
+
+            mesh_cfg = params.get('mesh_size', {})
+            lc_global = float(mesh_cfg.get('global', 15.0))
+            lc_fillet = float(mesh_cfg.get('fillet', 3.0))
+            element_order = int(mesh_cfg.get('order', 1)) 
+            
+            algo_3d = int(params.get('mesh_quality', {}).get('algorithm_3d', 1))
+            gmsh.option.setNumber("Mesh.Algorithm3D", algo_3d)
+            gmsh.option.setNumber("Mesh.ElementOrder", element_order)
+            
+            # Limity
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc_global)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc_fillet * 0.5)
+
+            p_data = params['profile_data']
+            pl_data = params['plate_data']
+            L = float(params['length'])
+            out_dir = params['output_dir']
+            name = params['model_name']
+            
+            if not os.path.exists(out_dir): os.makedirs(out_dir)
+            factory = gmsh.model.occ
+            
+            # Wymiary
+            h = float(p_data['hc'])
+            b_flange = float(p_data['bc'])
+            tw = float(p_data['twc'])
+            tf = float(p_data['tfc'])
+            r_root = float(p_data.get('rc', 0.0))
+            tp = float(pl_data['tp'])
+            bp = float(pl_data['bp'])
+
+            # --- GEOMETRIA ---
+            
+            # 1. Płaskownik (Y: -tp/2 do tp/2, Z: -bp/2 do bp/2)
+            y_p_half = tp / 2.0
+            z_p_half = bp / 2.0
+            
+            # Punkty płaskownika
+            pts_plate = [
+                (-y_p_half, -z_p_half), 
+                ( y_p_half, -z_p_half), 
+                ( y_p_half,  z_p_half), 
+                (-y_p_half,  z_p_half)
+            ]
+            
+            tags_plate = []
+            for y, z in pts_plate:
+                tags_plate.append(factory.addPoint(0, y, z, lc_global))
+                
+            lines_plate = []
+            for i in range(4):
+                lines_plate.append(factory.addLine(tags_plate[i], tags_plate[(i+1)%4]))
+            
+            loop_plate = factory.addCurveLoop(lines_plate)
+            face_plate = factory.addPlaneSurface([loop_plate])
+
+            # 2. Ceowniki (Y startuje od tp/2)
+            # Funkcja rysująca kształt C
+            def draw_channel(z_start, direction_z):
+                dz = direction_z # +1 lub -1
+                y_base = tp / 2.0
+                
+                # Definicja punktów obrysu (uproszczona dla stabilności meshera, bez fizycznych łuków CAD, 
+                # ale z zagęszczeniem punktów w narożach)
+                
+                # Lista krotek (y, z, czy_fillet)
+                pts_def = [
+                    (y_base, z_start, False),                                     # 0. Narożnik zewn dolny
+                    (y_base + h, z_start, False),                                 # 1. Narożnik zewn górny
+                    (y_base + h, z_start + b_flange * dz, False),                 # 2. Koniec półki górnej zewn
+                    (y_base + h - tf, z_start + b_flange * dz, False),            # 3. Koniec półki górnej wewn
+                    (y_base + h - tf, z_start + tw * dz + r_root*dz, True),       # 4. Wewn góra (przed łukiem)
+                    (y_base + tf + r_root, z_start + tw * dz, True),              # 5. Wewn dół (przed łukiem - wariant uproszczony skosu)
+                    (y_base + tf, z_start + b_flange * dz, False),                # 6. Koniec półki dolnej wewn
+                    (y_base, z_start + b_flange * dz, False)                      # 7. Koniec półki dolnej zewn
+                ]
+                
+                tags = []
+                for y, z, is_fillet in pts_def:
+                    lc = lc_fillet if is_fillet else lc_global
+                    tags.append(factory.addPoint(0, y, z, lc))
+                
+                lns = []
+                for i in range(len(tags)-1):
+                    lns.append(factory.addLine(tags[i], tags[i+1]))
+                lns.append(factory.addLine(tags[-1], tags[0])) # Zamknięcie
+                
+                return factory.addPlaneSurface([factory.addCurveLoop(lns)])
+
+            # Lewy (Z < 0, stopki w prawo czyli +Z) -> direction_z = 1
+            # Prawy (Z > 0, stopki w lewo czyli -Z) -> direction_z = -1
+            # Zaczepienie na krawędziach płaskownika: -bp/2 i bp/2
+            face_left = draw_channel(-bp/2.0, 1)
+            face_right = draw_channel(bp/2.0, -1)
+            
+            factory.synchronize()
+
+            # Extrude (Wyciągnięcie w X)
+            vol_plate = factory.extrude([(2, face_plate)], L, 0, 0)
+            vol_left = factory.extrude([(2, face_left)], L, 0, 0)
+            vol_right = factory.extrude([(2, face_right)], L, 0, 0)
+            
+            factory.synchronize()
+
+            # Fragment (Scalanie brył w jedną topologię)
+            # Zbieramy tagi objętości (dim=3)
+            v_input = []
+            for v_list in [vol_plate, vol_left, vol_right]:
+                for dim, tag in v_list:
+                    if dim == 3: v_input.append((3, tag))
+            
+            # Opcjonalne naprawianie
+            try: factory.healShapes(v_input)
+            except: pass
+            
+            frag_out, _ = factory.fragment(v_input, v_input)
+            factory.synchronize()
+            
+            # Grupa fizyczna dla całej objętości
+            final_vols = [tag for dim, tag in frag_out if dim == 3]
+            gmsh.model.addPhysicalGroup(3, final_vols, name="VOL_ALL")
+            
+            # NIE tworzymy Physical Surface, aby nie eksportować elementów 2D do .inp (CalculiX tego nie lubi w 3D)
+
+            # --- APLIKACJA PÓŁ ZAGĘSZCZEŃ ---
+            ref_zones = params.get("refinement_zones", [])
+            if ref_zones:
+                self._apply_refinement(ref_zones, lc_global, p_data, pl_data, L)
+
+            # --- SIATKA ---
+            self.log("Generowanie siatki...")
+            gmsh.model.mesh.generate(3)
+            
+            if element_order == 2:
+                self.log("Konwersja do elementów 2. rzędu...")
+                gmsh.model.mesh.setOrder(2)
+            
+            # --- EKSPORT WĘZŁÓW I GRUP ---
+            self.log("Identyfikacja grup węzłów...")
+            eps = 1.0 # Tolerancja 1mm
+            y_int = tp / 2.0
+            
+            # Manualne wybieranie węzłów
+            supp_nodes = self._get_nodes_manual(-eps, -1e4, -1e4, eps, 1e4, 1e4)
+            load_nodes = self._get_nodes_manual(L-eps, -1e4, -1e4, L+eps, 1e4, 1e4)
+            # Interface: Y bliskie tp/2
+            int_nodes = self._get_nodes_manual(-eps, y_int-eps, -1e4, L+eps, y_int+eps, 1e4)
+            
+            groups_data = {
+                "SURF_SUPPORT": supp_nodes,
+                "SURF_LOAD": load_nodes,
+                "GRP_INTERFACE": int_nodes
+            }
+            
+            self.log(f"Znaleziono węzły: Supp={len(supp_nodes)}, Load={len(load_nodes)}")
+            
+            # Ścieżki plików
+            nodes_csv = os.path.join(out_dir, f"{name}_nodes.csv")
+            groups_json = os.path.join(out_dir, f"{name}_groups.json")
+            path_inp = os.path.join(out_dir, f"{name}.inp")
+            path_msh = os.path.join(out_dir, f"{name}.msh")
+            
+            # Zapis CSV z mapą węzłów (dla Engine FEM)
+            tags_all, coords_all, _ = gmsh.model.mesh.getNodes()
+            # Uwaga: getNodes może zwrócić bardzo dużo danych.
+            
+            with open(nodes_csv, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(["NodeID", "X", "Y", "Z"])
+                for i in range(len(tags_all)):
+                    # coords_all jest płaskie: x,y,z,x,y,z...
+                    w.writerow([
+                        tags_all[i], 
+                        coords_all[3*i], 
+                        coords_all[3*i+1], 
+                        coords_all[3*i+2]
+                    ])
+            
+            # Zapis JSON z grupami
+            with open(groups_json, 'w') as f:
+                json.dump(groups_data, f)
+            
+            # Zapis .inp i .msh
+            gmsh.write(path_inp)
+            gmsh.write(path_msh)
+            
+            return {
+                "paths": {
+                    "inp": os.path.abspath(path_inp),
+                    "nodes_csv": os.path.abspath(nodes_csv),
+                    "groups_json": os.path.abspath(groups_json)
+                },
+                "stats": {"nodes": len(tags_all)}
+            }
+            
         except Exception as e:
-            # Fallback: BoundingBox
-            bb = gmsh.model.getBoundingBox(dim, tag)
-            cx, cy, cz = (bb[0]+bb[3])/2, (bb[1]+bb[4])/2, (bb[2]+bb[5])/2
-            total_area += 1.0
-            moment_x += cx
-            moment_y += cy
-            moment_z += cz
-
-    if total_area <= 1e-9:
-        return (0.0, 0.0, 0.0)
-        
-    return (moment_x / total_area, moment_y / total_area, moment_z / total_area)
-
-def create_rect_yz(occ, y_start, z_start, height, width):
-    """
-    Pomocnicza funkcja tworząca prostokąt na płaszczyźnie YZ przy użyciu linii.
-    Unika błędu 'float interpreted as integer' w addRectangle.
-    Zwraca tag powierzchni.
-    """
-    # Punkty (X zawsze 0)
-    p1 = occ.addPoint(0, y_start, z_start)
-    p2 = occ.addPoint(0, y_start + height, z_start)
-    p3 = occ.addPoint(0, y_start + height, z_start + width)
-    p4 = occ.addPoint(0, y_start, z_start + width)
-    
-    # Linie
-    l1 = occ.addLine(p1, p2)
-    l2 = occ.addLine(p2, p3)
-    l3 = occ.addLine(p3, p4)
-    l4 = occ.addLine(p4, p1)
-    
-    # Pętla i Powierzchnia
-    loop = occ.addCurveLoop([l1, l2, l3, l4])
-    surf = occ.addPlaneSurface([loop])
-    
-    return surf
-
-def create_and_mesh_model(geometry_params, mesh_params, job_name, output_dir):
-    """
-    Generuje geometrię i siatkę w GMSH.
-    UWAGA: Zakłada, że gmsh.initialize() zostało wywołane w wątku głównym GUI.
-    Tutaj robimy tylko gmsh.clear().
-    """
-    
-    # Czyścimy poprzedni model zamiast inicjalizować nowy proces
-    gmsh.clear()
-    
-    gmsh.model.add(job_name)
-    occ = gmsh.model.occ
-    
-    # 1. Rozpakowanie danych geometrii
-    L = float(geometry_params['L'])
-    tp = float(geometry_params['tp'])
-    bp = float(geometry_params['bp'])
-    hc = float(geometry_params['hc'])
-    bc = float(geometry_params['bc'])
-    twc = float(geometry_params['twc'])
-    tfc = float(geometry_params['tfc'])
-    yc_global = float(geometry_params['yc_global'])
-
-    # 2. Parametry siatki (Nowe parametry)
-    # base_mesh_size: wielkość podstawowa elementu (wpisana przez usera)
-    # min_wall_factor: mnożnik dla najcieńszej ścianki (np. 0.2)
-    user_base_size = float(mesh_params.get('base_mesh_size', 10.0))
-    min_wall_factor = float(mesh_params.get('min_wall_factor', 0.5))
-    
-    # Znajdujemy najcieńszą ściankę
-    min_thickness = min(tp, twc, tfc)
-    
-    # Rozmiar minimalny to ułamek grubości ścianki (dla detali)
-    calculated_min_size = min_thickness * min_wall_factor
-    
-    # Rozmiar maksymalny to zadeklarowana wielkość bazowa
-    calculated_max_size = user_base_size
-
-    # --------------------------------------------------------------------------
-    # 3. TWORZENIE PRZEKROJU 2D (Płaszczyzna YZ, X=0) METODĄ PUNKTOWĄ
-    # --------------------------------------------------------------------------
-    # A. Płaskownik
-    # Y: 0 do tp, Z: -bp/2 do bp/2
-    # create_rect_yz(occ, y_start, z_start, dy, dz)
-    tag_flat = create_rect_yz(occ, 0, -bp/2, tp, bp)
-    
-    # B. Ceowniki
-    z_web_inner = bp/2 - twc
-    y_top = 0
-    y_bot = -hc
-    
-    # Ceownik 1 (Prawy) - budujemy z 3 prostokątów i łączymy (Fuse)
-    # Środnik
-    web1 = create_rect_yz(occ, y_bot, z_web_inner, hc, twc)
-    # Stopka górna
-    flange_top1 = create_rect_yz(occ, y_top - tfc, z_web_inner - (bc-twc), tfc, bc-twc)
-    # Stopka dolna
-    flange_bot1 = create_rect_yz(occ, y_bot, z_web_inner - (bc-twc), tfc, bc-twc)
-    
-    # Scalanie C1
-    c1_fused, _ = occ.fuse([(2, web1)], [(2, flange_top1), (2, flange_bot1)])
-    tag_c1 = c1_fused[0][1]
-    
-    # C. Ceownik 2 (Lewy - Lustro)
-    c2_copy = occ.copy([(2, tag_c1)])
-    occ.mirror(c2_copy, 0, 0, 0, 0, 0, 1) 
-    tag_c2 = c2_copy[0][1]
-
-    # --------------------------------------------------------------------------
-    # 4. POZYCJONOWANIE (Centrowanie Płaskownika w Y=0)
-    # --------------------------------------------------------------------------
-    dy_shift = -tp / 2.0
-    occ.translate([(2, tag_flat), (2, tag_c1), (2, tag_c2)], 0, dy_shift, 0)
-    
-    # Poziom styku (potrzebny do detekcji powierzchni)
-    y_contact_level = dy_shift
-
-    # --------------------------------------------------------------------------
-    # 5. WYCIĄGANIE (EXTRUDE)
-    # --------------------------------------------------------------------------
-    vol_flat = occ.extrude([(2, tag_flat)], L, 0, 0)
-    vol_c1 = occ.extrude([(2, tag_c1)], L, 0, 0)
-    vol_c2 = occ.extrude([(2, tag_c2)], L, 0, 0)
-    
-    v_flat_tag = vol_flat[1][1]
-    v_c1_tag = vol_c1[1][1]
-    v_c2_tag = vol_c2[1][1]
-    
-    occ.synchronize()
-
-    # --------------------------------------------------------------------------
-    # 6. FRAGMENTACJA (Spójna Siatka)
-    # --------------------------------------------------------------------------
-    input_volumes = [(3, v_flat_tag), (3, v_c1_tag), (3, v_c2_tag)]
-    occ.fragment(input_volumes, input_volumes)
-    occ.synchronize()
-    
-    # --------------------------------------------------------------------------
-    # 7. GRUPY FIZYCZNE I DETEKCJA POWIERZCHNI
-    # --------------------------------------------------------------------------
-    all_surfs = gmsh.model.getEntities(2)
-    surfaces_map = {
-        "SUPPORT_FACE": [],
-        "LOAD_FACE": [],
-        "CONTACT_C1_Z_POS": [],
-        "CONTACT_C2_Z_NEG": [],
-        "FLATBAR_TOP": [],
-        "WEB_SURFACES": [],
-        "FLANGES_FREE": []
-    }
-    
-    eps = 1e-3
-    
-    for s in all_surfs:
-        tag = s[1]
-        bb = gmsh.model.getBoundingBox(2, tag)
-        cx, cy, cz = (bb[0]+bb[3])/2, (bb[1]+bb[4])/2, (bb[2]+bb[5])/2
-        
-        # 1. Utwierdzenie (X=0)
-        if abs(cx - 0.0) < eps:
-            surfaces_map["SUPPORT_FACE"].append(tag)
-        # 2. Obciążenie (X=L)
-        elif abs(cx - L) < eps:
-            surfaces_map["LOAD_FACE"].append(tag)
-        # 3. Styki (Y = y_contact_level)
-        elif abs(cy - y_contact_level) < eps:
-            if abs(cz) < (bp/2 + eps):
-                if cz > eps: surfaces_map["CONTACT_C1_Z_POS"].append(tag)
-                elif cz < -eps: surfaces_map["CONTACT_C2_Z_NEG"].append(tag)
-        # 4. Góra Płaskownika (Y = y_contact + tp)
-        elif abs(cy - (y_contact_level + tp)) < eps:
-            surfaces_map["FLATBAR_TOP"].append(tag)
-        # 5. Środniki (Zew. pionowe, Z = +/- bp/2)
-        elif abs(abs(cz) - bp/2) < eps:
-            surfaces_map["WEB_SURFACES"].append(tag)
-
-    for name, tags in surfaces_map.items():
-        if tags: gmsh.model.addPhysicalGroup(2, tags, name=name)
-        
-    all_vols = gmsh.model.getEntities(3)
-    v_tags = [v[1] for v in all_vols]
-    gmsh.model.addPhysicalGroup(3, v_tags, name="PART_SOLID")
-
-    # --------------------------------------------------------------------------
-    # 8. OBLICZANIE PUNKTÓW REFERENCYJNYCH (COG)
-    # --------------------------------------------------------------------------
-    rp_support = calculate_cog(2, surfaces_map["SUPPORT_FACE"])
-    rp_load = calculate_cog(2, surfaces_map["LOAD_FACE"])
-    
-    # --------------------------------------------------------------------------
-    # 9. SIATKOWANIE I PARAMETRY
-    # --------------------------------------------------------------------------
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", calculated_min_size)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", calculated_max_size)
-    
-    mesh_order = mesh_params.get('mesh_order', 2)
-    gmsh.option.setNumber("Mesh.ElementOrder", mesh_order)
-    
-    cores_mesh = mesh_params.get('mesh_cores', 4)
-    gmsh.option.setNumber("General.NumThreads", cores_mesh)
-    
-    # Algorytm: 1=Delaunay, 4=Frontal, 10=HXT (Dobre dla parallel)
-    # HXT (10) jest świetny do wielowątkowości w 3D
-    gmsh.option.setNumber("Mesh.Algorithm3D", 10) 
-    
-    gmsh.model.mesh.generate(3)
-    
-    # Optymalizacja HighOrder (jeśli rząd > 1)
-    if mesh_order > 1:
-        gmsh.model.mesh.optimize("HighOrder")
-    else:
-        gmsh.model.mesh.optimize("Netgen")
-    
-    msh_path = os.path.join(output_dir, f"{job_name}.msh")
-    gmsh.write(msh_path)
-    
-    stl_path = os.path.join(output_dir, f"{job_name}_vis.stl")
-    gmsh.write(stl_path)
-    
-    return {
-        "msh_file": msh_path,
-        "stl_file": stl_path,
-        "ref_point_support": rp_support,
-        "ref_point_load": rp_load
-    }
+            self.log(f"CRITICAL ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        finally:
+            self._finalize_gmsh() 
