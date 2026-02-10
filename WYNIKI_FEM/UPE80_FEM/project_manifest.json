@@ -1,0 +1,19 @@
+{
+    "INIT": {
+        "created": "2026-02-09 20:11:30.300099"
+    },
+    "mesh.inp": {
+        "path": "Q:\\Projekty\\cienki\\WYNIKI_FEM\\UPE80_FEM\\03_Obliczenia_Robocze\\Iteracja_1\\mesh.inp",
+        "category": "FEM_WORK",
+        "subdir": "Iteracja_1",
+        "timestamp": "2026-02-09 20:29:02.243640",
+        "meta": {}
+    },
+    "viz_mesh.vtk": {
+        "path": "Q:\\Projekty\\cienki\\WYNIKI_FEM\\UPE80_FEM\\03_Obliczenia_Robocze\\Iteracja_1\\viz_mesh.vtk",
+        "category": "FEM_WORK",
+        "subdir": "Iteracja_1",
+        "timestamp": "2026-02-09 20:29:02.245559",
+        "meta": {}
+    }
+}

@@ -468,9 +468,9 @@ class FemWorker(QThread):
 # ==============================================================================
 
 class Tab1_Dashboard(QWidget):
-    def __init__(self, router_instance):  # <--- Dodano argument
+    def __init__(self, router_instance):  # <--- ZMIANA 1: Dodano argument
         super().__init__()
-        self.router = router_instance     # <--- Dodano przypisanie
+        self.router = router_instance     # <--- ZMIANA 2: Przypisanie routera
         self.profile_widgets = []
         self.init_ui()
 

@@ -1,0 +1,19 @@
+{
+    "INIT": {
+        "created": "2026-02-09 19:54:33.481802"
+    },
+    "mesh.inp": {
+        "path": "Q:\\Projekty\\cienki\\WYNIKI_FEM\\UPN65_FEM\\03_Obliczenia_Robocze\\Iteracja_1\\mesh.inp",
+        "category": "FEM_WORK",
+        "subdir": "Iteracja_1",
+        "timestamp": "2026-02-09 20:22:17.550508",
+        "meta": {}
+    },
+    "viz_mesh.vtk": {
+        "path": "Q:\\Projekty\\cienki\\WYNIKI_FEM\\UPN65_FEM\\03_Obliczenia_Robocze\\Iteracja_1\\viz_mesh.vtk",
+        "category": "FEM_WORK",
+        "subdir": "Iteracja_1",
+        "timestamp": "2026-02-09 20:22:17.551512",
+        "meta": {}
+    }
+}
