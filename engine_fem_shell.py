@@ -23,6 +23,10 @@ class FemEngineShell:
         # Przechowalnia kluczowych danych z geometrii
         self.groups = {}
         self.nodes_map = {} # id -> [x, y, z]
+        
+        # [NOWOŚĆ] Zapamiętujemy ID węzła referencyjnego (końca belki)
+        # Służy do wyciągnięcia ugięcia bez mapowania całej siatki
+        self.ref_node_id = None 
 
     def _load_metadata(self, base_path_no_ext):
         """Wczytuje mapę węzłów i grupy z plików JSON/CSV wygenerowanych przez geometrię."""
@@ -34,7 +38,7 @@ class FemEngineShell:
             with open(groups_path, 'r') as f:
                 self.groups = json.load(f)
         
-        # 2. Wczytanie węzłów (do celów diagnostycznych, np. znalezienie Max ID)
+        # 2. Wczytanie węzłów (potrzebujemy tylko max_id)
         self.nodes_map = {}
         if os.path.exists(nodes_path):
             with open(nodes_path, 'r') as f:
@@ -65,7 +69,7 @@ class FemEngineShell:
             mesh_content = f.read()
 
         deck = []
-        deck.append("** CALCULIX DECK FOR SHELL MODEL (Generated via Engine v2) **")
+        deck.append("** CALCULIX DECK FOR SHELL MODEL (Merged Version) **")
         deck.append(mesh_content)
         
         # --- 1. DEFINICJA NODE SETÓW (GRUP) ---
@@ -85,7 +89,6 @@ class FemEngineShell:
 
         # --- 2. MATERIAŁ (Z BAZY DANYCH) ---
         # Pobieramy nazwę materiału przekazaną z GUI/Optymalizatora
-        # Klucz 'Stop' pochodzi z candidate_data (np. z solver_1_standard.py)
         mat_name = run_params.get("Stop", "S355")
         
         # Pobieramy bazę
@@ -100,18 +103,16 @@ class FemEngineShell:
             # Obliczenie współczynnika Poissona (nu = E/2G - 1)
             if G_val > 0:
                 nu_val = (E_val / (2.0 * G_val)) - 1.0
-                # Zabezpieczenie fizyczne
                 if not (0.0 < nu_val < 0.5): nu_val = 0.3
             else:
                 nu_val = 0.3
             
             # Konwersja gęstości: kg/m3 -> t/mm3 (jednostka spójna dla N/mm2)
-            # 1 kg/m3 = 1e-9 t/mm3
             rho_fem = rho_kg_m3 * 1.0e-9
             
             comment = f"** Material from DB: {mat_name} (Re={mat_data.get('Re',0)})"
         else:
-            # Fallback (gdyby nazwa nie pasowała)
+            # Fallback
             E_val = float(run_params.get("E", 210000.0))
             nu_val = float(run_params.get("nu", 0.3))
             rho_fem = 7.85e-9
@@ -128,9 +129,6 @@ class FemEngineShell:
         deck.append(f"{rho_fem}")
 
         # --- 3. SEKCJE POWŁOKOWE (*SHELL SECTION) ---
-        # Gmsh zapisuje Physical Groups jako ELSET w formacie .inp.
-        # Nazwy z engine_geometry_shell: SHELL_PLATE, SHELL_WEBS, SHELL_FLANGES
-        
         plate_data = run_params.get("plate_data", {})
         profile_data = run_params.get("profile_data", {})
         
@@ -139,58 +137,51 @@ class FemEngineShell:
         twc = float(profile_data.get("twc", 6.0))
         tfc = float(profile_data.get("tfc", 10.0))
         
-        # Przypisanie sekcji z użyciem zdefiniowanego materiału
+        # Przypisanie sekcji
         deck.append(f"*SHELL SECTION, ELSET=SHELL_PLATE, MATERIAL={INTERNAL_MAT_NAME}")
         deck.append(f"{tp}")
-        
         deck.append(f"*SHELL SECTION, ELSET=SHELL_WEBS, MATERIAL={INTERNAL_MAT_NAME}")
         deck.append(f"{twc}")
-        
         deck.append(f"*SHELL SECTION, ELSET=SHELL_FLANGES, MATERIAL={INTERNAL_MAT_NAME}")
         deck.append(f"{tfc}")
 
         # --- 4. WIĄZANIA SPOIN (*TIE) ---
-        # Łączymy płaskownik (MASTER) ze stopkami (SLAVE).
-        # Ponieważ powierzchnie są fizycznie rozsunięte (model mid-surface),
-        # musimy ustawić tolerancję większą niż luka geometryczna.
-        
-        # Luka = (grubość_płaskownika/2 + grubość_stopki/2)
+        # Tolerancja uwzględniająca mid-surfaces
         gap = (tp + tfc) / 2.0
-        tie_tol = gap + 2.0 # Margines bezpieczeństwa 2mm, żeby na pewno złapało węzły
+        tie_tol = gap + 2.0 
         
-        # Grupy NSET_WELD_... są generowane przez engine_geometry_shell
         deck.append(f"*TIE, NAME=WELD_L, POSITION TOLERANCE={tie_tol}")
-        deck.append("NSET_WELD_L_SLAVE, NSET_WELD_L_MASTER")
-        
+        deck.append("NSET_LINE_WELD_L_SLAVE, NSET_LINE_WELD_L_MASTER")
         deck.append(f"*TIE, NAME=WELD_R, POSITION TOLERANCE={tie_tol}")
-        deck.append("NSET_WELD_R_SLAVE, NSET_WELD_R_MASTER")
+        deck.append("NSET_LINE_WELD_R_SLAVE, NSET_LINE_WELD_R_MASTER")
 
         # --- 5. OBCIĄŻENIE (*RIGID BODY & REF NODE) ---
         # Tworzymy nowy węzeł (Ref Node) w przestrzeni
-        ref_node_id = max_id + 1
+        # [ZMIANA] Przypisujemy do self.ref_node_id, aby parser mógł go użyć
+        self.ref_node_id = max_id + 1
         
         L = float(run_params.get("Length", 1000.0))
-        # Y_ref zdefiniowane przez użytkownika (np. ramię siły, środek ciężkości)
         y_ref = float(run_params.get("Y_ref_node", 0.0))
         
-        # Współrzędne Ref Node: X=L (koniec belki), Y=y_ref, Z=0 (oś symetrii)
         deck.append("*NODE")
-        deck.append(f"{ref_node_id}, {L}, {y_ref}, 0.0")
+        deck.append(f"{self.ref_node_id}, {L}, {y_ref}, 0.0")
         
         # Definiujemy Rigid Body (Sztywne połączenie)
-        # NSET_LOAD to krawędź końca powłok (zdefiniowana w geometrii)
-        deck.append(f"*RIGID BODY, NSET=NSET_LOAD, REF NODE={ref_node_id}")
+        deck.append(f"*RIGID BODY, NSET=NSET_LOAD, REF NODE={self.ref_node_id}")
+        
+        # Tworzymy NSET dla Ref Node, żeby łatwo poprosić o output
+        deck.append(f"*NSET, NSET=REF_NODE_SET")
+        deck.append(f"{self.ref_node_id}")
 
         # --- 6. KROK 1: STATYKA ---
         deck.append("*STEP")
         deck.append("*STATIC")
         
-        # Warunki brzegowe (Utwierdzenie na początku X=0)
-        # NSET_SUPPORT generowane w geometrii
+        # Warunki brzegowe
         deck.append("*BOUNDARY")
         deck.append("NSET_SUPPORT, 1, 6, 0.0")
         
-        # Siły skupione (CLOAD) przykładane do REF NODE
+        # Siły skupione (CLOAD)
         deck.append("*CLOAD")
         
         fx = float(run_params.get("Fx", 0.0))
@@ -200,22 +191,22 @@ class FemEngineShell:
         my = float(run_params.get("My", 0.0))
         mz = float(run_params.get("Mz", 0.0))
         
-        # Aplikacja sił, jeśli są niezerowe
-        if abs(fx) > 1e-9: deck.append(f"{ref_node_id}, 1, {fx}")
-        if abs(fy) > 1e-9: deck.append(f"{ref_node_id}, 2, {fy}")
-        if abs(fz) > 1e-9: deck.append(f"{ref_node_id}, 3, {fz}")
-        if abs(mx) > 1e-9: deck.append(f"{ref_node_id}, 4, {mx}")
-        if abs(my) > 1e-9: deck.append(f"{ref_node_id}, 5, {my}")
-        if abs(mz) > 1e-9: deck.append(f"{ref_node_id}, 6, {mz}")
+        if abs(fx) > 1e-9: deck.append(f"{self.ref_node_id}, 1, {fx}")
+        if abs(fy) > 1e-9: deck.append(f"{self.ref_node_id}, 2, {fy}")
+        if abs(fz) > 1e-9: deck.append(f"{self.ref_node_id}, 3, {fz}")
+        if abs(mx) > 1e-9: deck.append(f"{self.ref_node_id}, 4, {mx}")
+        if abs(my) > 1e-9: deck.append(f"{self.ref_node_id}, 5, {my}")
+        if abs(mz) > 1e-9: deck.append(f"{self.ref_node_id}, 6, {mz}")
 
         # Output Requests
-        # Sumaryczne reakcje w podporze
         deck.append("*NODE PRINT, NSET=NSET_SUPPORT, TOTAL=YES")
-        deck.append("RF") 
-        # Przemieszczenia wszystkich węzłów
-        deck.append("*NODE PRINT, NSET=NALL")
+        deck.append("RF")
+        
+        # [KLUCZOWE] Prośba o wyniki dla węzła referencyjnego
+        deck.append("*NODE PRINT, NSET=REF_NODE_SET")
         deck.append("U")
-        # Naprężenia w elementach
+        
+        # Naprężenia w elementach (dla Max VM)
         deck.append("*EL PRINT")
         deck.append("S")
         
@@ -224,18 +215,16 @@ class FemEngineShell:
         # --- 7. KROK 2: WYBOCZENIE (*BUCKLE) ---
         deck.append("*STEP")
         deck.append("*BUCKLE")
-        deck.append("10") # Liczymy 10 pierwszych postaci
+        deck.append("10")
         
         deck.append("*CLOAD")
-        # Powtórzenie obciążeń (Load Bucket)
-        if abs(fx) > 1e-9: deck.append(f"{ref_node_id}, 1, {fx}")
-        if abs(fy) > 1e-9: deck.append(f"{ref_node_id}, 2, {fy}")
-        if abs(fz) > 1e-9: deck.append(f"{ref_node_id}, 3, {fz}")
-        if abs(mx) > 1e-9: deck.append(f"{ref_node_id}, 4, {mx}")
-        if abs(my) > 1e-9: deck.append(f"{ref_node_id}, 5, {my}")
-        if abs(mz) > 1e-9: deck.append(f"{ref_node_id}, 6, {mz}")
+        if abs(fx) > 1e-9: deck.append(f"{self.ref_node_id}, 1, {fx}")
+        if abs(fy) > 1e-9: deck.append(f"{self.ref_node_id}, 2, {fy}")
+        if abs(fz) > 1e-9: deck.append(f"{self.ref_node_id}, 3, {fz}")
+        if abs(mx) > 1e-9: deck.append(f"{self.ref_node_id}, 4, {mx}")
+        if abs(my) > 1e-9: deck.append(f"{self.ref_node_id}, 5, {my}")
+        if abs(mz) > 1e-9: deck.append(f"{self.ref_node_id}, 6, {mz}")
         
-        # Zapis postaci wyboczenia do pliku .frd
         deck.append("*NODE FILE")
         deck.append("U")
         deck.append("*END STEP")
@@ -252,14 +241,11 @@ class FemEngineShell:
     def run_solver(self, inp_path, work_dir, num_threads=4, callback=None):
         """Uruchamia CalculiX (ccx)."""
         ccx_cmd = self.ccx_path
-        # Szukanie lokalnego ccx.exe jeśli ścieżka nie jest absolutna
         if not os.path.isabs(ccx_cmd) and not shutil.which(ccx_cmd):
              local = os.path.join(os.getcwd(), ccx_cmd + ".exe")
              if os.path.exists(local): ccx_cmd = local
              
         job_name = os.path.splitext(os.path.basename(inp_path))[0]
-        
-        # Ustawienie zmiennych środowiskowych
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = str(num_threads)
         
@@ -269,8 +255,6 @@ class FemEngineShell:
                 cmd, cwd=work_dir, shell=(os.name=='nt'), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
             )
-            
-            # Czytanie logów w czasie rzeczywistym
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
@@ -279,7 +263,6 @@ class FemEngineShell:
                     l = line.strip()
                     if l and callback:
                         callback(f"CCX: {l}")
-                        
             return (process.poll() == 0)
         except Exception as e:
             if callback: callback(f"ERROR executing solver: {e}")
@@ -294,13 +277,14 @@ class FemEngineShell:
             "MODEL_MAX_VM": 0.0,
             "BUCKLING_FACTORS": [],
             "REACTIONS": {"Fx":0, "Fy":0, "Fz":0, "Mx":0, "My":0, "Mz":0},
-            "DISPLACEMENTS_REF": {"Ux":0, "Uy":0, "Uz":0}
+            "DISPLACEMENTS_REF": {"Ux":0.0, "Uy":0.0, "Uz":0.0},
+            "converged": False
         }
         
-        # Zmienne stanu parsera
         current_step = 0
         reading_reactions = False
         reading_stresses = False
+        current_type = None # disp, stress, force
         
         max_vm = 0.0
         
@@ -318,38 +302,39 @@ class FemEngineShell:
 
                 # --- STEP 1: STATYKA ---
                 if current_step == 1:
-                    # A. Reakcje (TOTAL)
-                    if "total" in l_lower and "forces" in l_lower:
-                        reading_reactions = True
-                        continue
                     
-                    if reading_reactions:
-                        parts = line.split()
-                        try:
-                            # Szukamy linii sumarycznej (zazwyczaj ostatnia w bloku total)
-                            # CalculiX output TOTAL=YES dla *NODE PRINT:
-                            # Sumuje siły dla każdego stopnia swobody.
-                            # Może być konieczne dostosowanie w zależności od wersji CCX.
-                            # Tutaj uproszczona heurystyka: jeśli widzimy duże liczby, to może być to.
-                            # W tym miejscu zalecam testy na konkretnym outpucie CCX.
-                            pass
-                        except: pass
-                        if "displacements" in l_lower or "stresses" in l_lower:
-                            reading_reactions = False
-
-                    # B. Naprężenia (Szukanie MAX VM)
+                    # 1. Wykrywanie typu danych (Displacements, Stresses, Forces)
+                    if "displacements" in l_lower:
+                        current_type = 'disp'
+                        continue
                     if "stresses" in l_lower:
-                        reading_stresses = True
+                        current_type = 'stress'
                         continue
-                    
-                    if reading_stresses:
-                        parts = line.split()
-                        if not parts or not parts[0].isdigit():
-                            if "displacements" in l_lower or "forces" in l_lower: reading_stresses = False
-                            continue
+                    if "forces" in l_lower:
+                        current_type = 'force'
+                        continue
+
+                    # Parsowanie linii z danymi
+                    parts = line.split()
+                    if not parts or not parts[0].isdigit():
+                        continue
                         
+                    nid = int(parts[0])
+                    
+                    # A. Przemieszczenia (szukamy Ref Node)
+                    if current_type == 'disp':
+                        if self.ref_node_id and nid == self.ref_node_id:
+                            # Format: Node, Ux, Uy, Uz
+                            try:
+                                results["DISPLACEMENTS_REF"]["Ux"] = float(parts[1])
+                                results["DISPLACEMENTS_REF"]["Uy"] = float(parts[2])
+                                results["DISPLACEMENTS_REF"]["Uz"] = float(parts[3])
+                            except: pass
+
+                    # B. Naprężenia (Max VM globalnie)
+                    elif current_type == 'stress':
                         try:
-                            # Format dla Shell (S): Elem_ID, Int_Pt, S11, S22, S33, S12, S13, S23
+                            # Format Shell: Elem_ID, Int_Pt, S11, S22, S33, S12, S13, S23
                             if len(parts) >= 8:
                                 s11 = float(parts[2])
                                 s22 = float(parts[3])
@@ -358,10 +343,12 @@ class FemEngineShell:
                                 s13 = float(parts[6])
                                 s23 = float(parts[7])
                                 
-                                # Von Mises dla ogólnego tensora 3D (Shell w CCX daje tensor 3D na powierzchni)
                                 vm = math.sqrt(0.5 * ((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
                                 if vm > max_vm: max_vm = vm
                         except: pass
+                        
+                    # C. Reakcje
+                    # (Można dodać parsowanie sumaryczne, jeśli CalculiX wyrzuca linię TOTAL)
 
                 # --- STEP 2: WYBOCZENIE ---
                 if current_step == 2:
@@ -373,8 +360,6 @@ class FemEngineShell:
                         except: pass
 
         results["MODEL_MAX_VM"] = max_vm
-        
-        # Uznajemy za zbieżny, jeśli udało się policzyć naprężenia
         results["converged"] = (max_vm > 0.0)
         
         return results
