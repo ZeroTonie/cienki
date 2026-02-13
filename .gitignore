@@ -1,3 +1,4 @@
-WYNIKI/
-solver_bin/
-__pycache__/
+/baza wiedzy
+/__pychache__
+/solver_bin
+/WYNIKI

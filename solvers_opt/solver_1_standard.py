@@ -19,6 +19,7 @@ import material_catalogue
 def sortuj_klucze_wg_priorytetu(wszystkie_klucze):
     """
     Ustawia kolejność kolumn zgodnie z życzeniem użytkownika.
+    Zaktualizowano o rozdzielone warunki UR (Stateczność vs Wytrzymałość).
     """
     # Definicja kolejności priorytetowej (Pełna lista pionowa)
     priorytety = [
@@ -31,7 +32,10 @@ def sortuj_klucze_wg_priorytetu(wszystkie_klucze):
         "Calc_Fy",
         "Calc_Fz",
         "Input_Load_Fx",
-        "Res_UR",
+        # --- SEKCJA WYTĘŻENIA (KLUCZOWA ZMIANA) ---
+        "Res_UR",           # Decydujące (Max)
+        "Res_UR_Stab",      # Warunek Stateczności (Wyboczenie/Zwichrzenie)
+        "Res_UR_Stress",    # Warunek Wytrzymałości (SGN - Von Mises / Re)
         "Status_Wymogow",
         "Res_Max_VonMises",
         "Res_Stab_M_cr",
@@ -286,8 +290,10 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                 bp = b_otw + 2 * hc
                 geo_data = {"bp": bp, "tp": tp_test}
                 
+                # Wywołanie silnika - zwróci UR jako max(Stab, Stress)
                 res = engine_solver.analizuj_przekroj_pelna_dokladnosc(upe_data, geo_data, load_full, config_solver.SAFETY_PARAMS)
                 
+                # Walidacja: Sprawdzamy UR (które teraz zawiera oba warunki) oraz Klasę Przekroju
                 if res['Wskazniki']['UR'] <= 1.0 and res['Wskazniki']['Klasa_Przekroju'] <= 3:
                     # Spełnia -> to jest kandydat na minimum. Idziemy dalej w dół.
                     tp_min = tp_test
@@ -367,6 +373,7 @@ def glowna_petla_optymalizacyjna(router_instance=None):
                     
                     res_test = engine_solver.analizuj_przekroj_pelna_dokladnosc(upe_data, geo_test, load_full, config_solver.SAFETY_PARAMS)
                     
+                    # Tu również sprawdzamy UR (max)
                     if res_test['Wskazniki']['UR'] <= 1.0 and res_test['Wskazniki']['Klasa_Przekroju'] <= 3:
                         max_b_otw_found = current_b_otw
                         ostatni_poprawny_wynik = res_test
