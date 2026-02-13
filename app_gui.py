@@ -606,6 +606,13 @@ class FemWorker(QThread):
         self.log_signal.emit(">>> START PROCEDURY FEM BATCH...")
         success_count = 0
         
+        def interaction_handler(eq, vm):
+            """Automatycznie przełącza na solver iteracyjny i wysyła powiadomienie do GUI."""
+            msg = f"Model ma ~{eq/1e6:.1f}M równań. Automatyczne przełączenie na solver iteracyjny dla stabilności."
+            self.log_signal.emit(f"  ! LIMIT: {msg}")
+            self.notification_signal.emit("Zmiana Solvera", msg)
+            return "ITERATIVE"
+
         for i, cand in enumerate(self.candidates):
             prof_name = cand.get('Nazwa_Profilu', 'Unknown')
             tp = float(cand.get("Input_Geo_tp", 10))
@@ -633,8 +640,9 @@ class FemWorker(QThread):
                 # Uruchomienie obliczeń (z callbackiem)
                 res = self.optimizer.run_single_candidate(
                     cand, 
-                    local_settings,
-                    signal_callback=self.log_signal.emit
+                    local_settings, 
+                    signal_callback=self.log_signal.emit,
+                    interaction_callback=interaction_handler
                 )
                 
                 res['profile_name'] = prof_name
@@ -1154,13 +1162,12 @@ class Tab4_Fem(QWidget):
                 self.inp_fem_yc.setText(f"{cand.get('Res_Geo_Yc', 0.0):.4f}")
 
     def init_ui(self):
-        # Główny splitter - dzieli okno na lewy (ustawienia) i prawy (wyniki) panel
+        # Zmiana na QSplitter dla elastycznego layoutu
         l = QSplitter(Qt.Orientation.Horizontal)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.addWidget(l)
         
-        # --- LEWY PANEL: Parametry i Ustawienia ---
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         
@@ -1169,11 +1176,10 @@ class Tab4_Fem(QWidget):
         l_inp.setSpacing(10)
         l_inp.setAlignment(Qt.AlignmentFlag.AlignTop)
         
-        field_width = 120
-        
-        # 1. Parametry Siatki
         g_par = QGroupBox("1. Parametry Siatki")
         f_par = QFormLayout(g_par)
+        
+        field_width = 120
         
         self.sp_mesh = QDoubleSpinBox(); self.sp_mesh.setValue(15.0); self.sp_mesh.setRange(1.0, 100.0); self.sp_mesh.setSuffix(" mm")
         self.sp_mesh.setToolTip("Globalny rozmiar elementu skończonego.")
@@ -1181,25 +1187,28 @@ class Tab4_Fem(QWidget):
         
         self.sp_fact = QDoubleSpinBox(); self.sp_fact.setValue(0.85); self.sp_fact.setSingleStep(0.1); self.sp_fact.setRange(0.1, 0.99)
         self.sp_fact.setFixedWidth(field_width)
-        
         self.sp_tol = QDoubleSpinBox(); self.sp_tol.setValue(4.0); self.sp_tol.setSuffix(" %")
         self.sp_tol.setFixedWidth(field_width)
-        
         self.sp_iter = QSpinBox(); self.sp_iter.setValue(3); self.sp_iter.setRange(1, 10)
         self.sp_iter.setFixedWidth(field_width)
         
+        # --- [NOWOŚĆ] ---
         self.sp_step = QDoubleSpinBox(); self.sp_step.setValue(50.0); self.sp_step.setRange(10.0, 500.0); self.sp_step.setSuffix(" mm")
         self.sp_step.setToolTip("Gęstość zapisu wyników wzdłuż belki (co ile mm tworzyć sondę).")
         self.sp_step.setFixedWidth(field_width)
+        # ----------------
         
         f_par.addRow("Startowy rozmiar:", self.sp_mesh)
         f_par.addRow("Wsp. zagęszczania:", self.sp_fact)
         f_par.addRow("Tolerancja:", self.sp_tol)
         f_par.addRow("Max iteracji:", self.sp_iter)
+        
+        # --- [NOWOŚĆ] ---
         f_par.addRow("Krok sondy (X):", self.sp_step)
+        
         l_inp.addWidget(g_par)
         
-        # 2. Obciążenia FEM
+        # --- [NOWOŚĆ] Obciążenia FEM ---
         g_loads_fem = QGroupBox("2. Obciążenia FEM")
         f_loads_fem = QFormLayout(g_loads_fem)
 
@@ -1207,12 +1216,10 @@ class Tab4_Fem(QWidget):
         self.rb_yc_manual = QRadioButton("Ręcznie")
         self.rb_yc_ramie = QRadioButton("Ramię (z analityki)")
         self.rb_yc_yc = QRadioButton("Środek ciężkości (z analityki)")
-        
         self.yc_mode_group = QButtonGroup(self)
         self.yc_mode_group.addButton(self.rb_yc_manual, 0)
         self.yc_mode_group.addButton(self.rb_yc_ramie, 1)
         self.yc_mode_group.addButton(self.rb_yc_yc, 2)
-        
         h_yc_mode.addWidget(self.rb_yc_manual); h_yc_mode.addWidget(self.rb_yc_ramie); h_yc_mode.addWidget(self.rb_yc_yc)
         h_yc_mode.addStretch()
 
@@ -1241,17 +1248,11 @@ class Tab4_Fem(QWidget):
         self.inp_fem_mx = QLineEdit("0"); self.inp_fem_mx.setFixedWidth(field_width)
         self.inp_fem_my = QLineEdit("0"); self.inp_fem_my.setFixedWidth(field_width)
         self.inp_fem_mz = QLineEdit("0"); self.inp_fem_mz.setFixedWidth(field_width)
-        
-        self.inp_fem_mx.setToolTip("Moment skręcający (wokół X).")
-        self.inp_fem_my.setToolTip("Moment zginający (wokół Y).")
-        self.inp_fem_mz.setToolTip("Moment zginający (wokół Z).")
-        
+        self.inp_fem_mx.setToolTip("Moment skręcający (wokół X)."); self.inp_fem_my.setToolTip("Moment zginający (wokół Y)."); self.inp_fem_mz.setToolTip("Moment zginający (wokół Z).")
         f_loads_fem.addRow("Moment Mx [Nmm]:", self.inp_fem_mx)
         f_loads_fem.addRow("Moment My [Nmm]:", self.inp_fem_my)
         f_loads_fem.addRow("Moment Mz [Nmm]:", self.inp_fem_mz)
-        l_inp.addWidget(g_loads_fem)
 
-        # 3. Zmienne (Opis)
         g_vars_fem = QGroupBox("3. Zmienne w wyrażeniach")
         l_vars_fem = QVBoxLayout(g_vars_fem)
         vars_text = """<p style="font-size:10px; margin:0;">Dostępne zmienne w polach momentów:</p>
@@ -1264,9 +1265,7 @@ class Tab4_Fem(QWidget):
         </ul>"""
         lbl_vars = QLabel(vars_text); lbl_vars.setWordWrap(True)
         l_vars_fem.addWidget(lbl_vars)
-        l_inp.addWidget(g_vars_fem)
 
-        # 4. Strefy Zagęszczania
         g_zones = QGroupBox("4. Strefy Zagęszczania")
         l_zones = QVBoxLayout(g_zones)
         self.tbl_zones = QTableWidget(0, 5)
@@ -1281,40 +1280,25 @@ class Tab4_Fem(QWidget):
         b_zdel = QPushButton("-"); b_zdel.setFixedSize(30, 25); b_zdel.clicked.connect(self.del_zone_row)
         hz.addWidget(b_zadd); hz.addWidget(b_zdel); hz.addStretch()
         l_zones.addLayout(hz)
-        l_inp.addWidget(g_zones)
 
-        # 5. Zasoby (Solver)
         g_sys = QGroupBox("5. Zasoby")
         f_sys = QFormLayout(g_sys)
-        
         self.combo_ord = QComboBox(); self.combo_ord.addItems(["Order 1", "Order 2"]); self.combo_ord.setCurrentIndex(0)
         self.combo_ord.setFixedWidth(field_width)
-        
         self.sp_cores_mesh = QSpinBox(); self.sp_cores_mesh.setRange(1, 128); self.sp_cores_mesh.setValue(20)
         self.sp_cores_mesh.setFixedWidth(field_width)
-        
         self.sp_cores_ccx = QSpinBox(); self.sp_cores_ccx.setRange(1, 128); self.sp_cores_ccx.setValue(20)
         self.sp_cores_ccx.setFixedWidth(field_width)
-        
-        self.sp_eq_limit = QSpinBox(); self.sp_eq_limit.setRange(100000, 10000000); self.sp_eq_limit.setValue(800000)
+        self.sp_eq_limit = QSpinBox(); self.sp_eq_limit.setRange(100000, 10000000); self.sp_eq_limit.setValue(2000000)
         self.sp_eq_limit.setSingleStep(100000)
         self.sp_eq_limit.setToolTip("Limit równań, po którym nastąpi automatyczne przełączenie na solver iteracyjny.")
         self.sp_eq_limit.setFixedWidth(field_width)
-        
-        # [NOWOŚĆ] Wybór Solvera (Manualne wymuszenie)
-        self.combo_solver = QComboBox()
-        self.combo_solver.addItems(["DIRECT (PaStiX/Spooles)", "ITERATIVE (Scaling)"])
-        self.combo_solver.setFixedWidth(field_width)
-        self.combo_solver.setToolTip("Wybierz 'ITERATIVE' dla bardzo dużych modeli (>1mln węzłów), aby oszczędzać RAM.")
 
         f_sys.addRow("Rząd:", self.combo_ord)
         f_sys.addRow("Rdzenie (M/S):", self.sp_cores_mesh)
         f_sys.addRow("Rdzenie (Solver):", self.sp_cores_ccx)
         f_sys.addRow("Limit równań:", self.sp_eq_limit)
-        f_sys.addRow("Typ Solvera:", self.combo_solver)
-        l_inp.addWidget(g_sys)
 
-        # 6. Sondy
         g_prob = QGroupBox("6. Punkty Pomiarowe (Sondy)")
         l_prob = QVBoxLayout(g_prob)
         self.tbl_prob = QTableWidget(0, 3)
@@ -1322,30 +1306,34 @@ class Tab4_Fem(QWidget):
         self.tbl_prob.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_prob.setFixedHeight(100)
         l_prob.addWidget(self.tbl_prob)
-        
         hp = QHBoxLayout()
         b_padd = QPushButton("+"); b_padd.setFixedSize(30, 25); b_padd.clicked.connect(self.add_probe_row)
         b_pdel = QPushButton("-"); b_pdel.setFixedSize(30, 25); b_pdel.clicked.connect(self.del_probe_row)
         hp.addWidget(b_padd); hp.addWidget(b_pdel); hp.addStretch()
         l_prob.addLayout(hp)
         self.add_probe_row("User_Center", "0", "0")
+
+        # Dodawanie widgetów do lewego panelu w poprawnej kolejności
+        l_inp.addWidget(g_loads_fem)
+        l_inp.addWidget(g_vars_fem)
+        l_inp.addWidget(g_zones)
+        l_inp.addWidget(g_sys)
         l_inp.addWidget(g_prob)
 
-        # Dodanie lewego panelu do scrolla i splittera
         scroll.setWidget(w_inp)
-        l.addWidget(scroll)
+        l.addWidget(scroll) # Dodanie do splittera
 
-        # --- PRAWY PANEL: WYNIKI I STATUS ---
+        # --- PRAWY PANEL (WYNIKI) ---
+        # --- [MODYFIKACJA] Dodanie QScrollArea dla prawego panelu ---
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        
+        # ----------------------------------------------------------
+
         w_res = QWidget()
         l_res = QVBoxLayout(w_res)
         
-        # Panel Sterowania
         f_ctrl = QFrame(); f_ctrl.setStyleSheet("background:#2a2a2a; border-radius:5px;")
         l_ctrl = QVBoxLayout(f_ctrl)
-        
         h_pilot = QHBoxLayout()
         self.btn_pilot = QPushButton("1. URUCHOM PILOTA")
         self.btn_pilot.setStyleSheet("background-color:#d35400; font-weight:bold; padding:8px;")
@@ -1368,7 +1356,6 @@ class Tab4_Fem(QWidget):
         l_ctrl.addWidget(self.btn_batch)
         l_res.addWidget(f_ctrl)
         
-        # Wizualizacja 3D (PyVista)
         splitter_vis = QSplitter(Qt.Orientation.Horizontal)
         self.frame_3d = QFrame()
         if HAS_PYVISTA:
@@ -1385,18 +1372,15 @@ class Tab4_Fem(QWidget):
         self.tree_vis.setFixedWidth(200)
         self.tree_vis.itemChanged.connect(self.on_tree_item_changed)
         splitter_vis.addWidget(self.tree_vis)
-        
         splitter_vis.setStretchFactor(0, 4); splitter_vis.setStretchFactor(1, 1)
         l_res.addWidget(splitter_vis, stretch=4)
 
-        # Tabela Wyników (Krótka)
         self.tbl_res = QTableWidget(0, 4)
         self.tbl_res.setHorizontalHeaderLabels(["Profil", "Iter", "Conv", "Max VM"])
         self.tbl_res.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_res.setFixedHeight(120)
         l_res.addWidget(self.tbl_res)
         
-        # Logi i Status
         splitter_logs = QSplitter(Qt.Orientation.Horizontal)
         self.con = QTextBrowser()
         self.con.setStyleSheet("font-family:Consolas; font-size:10px; background:#111; color:#0f0;")
@@ -1407,22 +1391,23 @@ class Tab4_Fem(QWidget):
         
         splitter_logs.setStretchFactor(0, 2); splitter_logs.setStretchFactor(1, 1)
         splitter_logs.setFixedHeight(180)
-        l_res.addWidget(splitter_logs)
         
-        # Dodanie prawego panelu do scrolla i głównego splittera
+        l_res.addWidget(splitter_logs)
+        l.addWidget(w_res) # Dodanie do splittera
+        # --- [MODYFIKACJA] Ustawienie widgetu w scroll area ---
         right_scroll.setWidget(w_res)
-        l.addWidget(right_scroll)
+        l.addWidget(right_scroll) # Dodanie do splittera
+        # ----------------------------------------------------
 
-        # Ustawienie proporcji
+        # Ustawienie domyślnych proporcji splittera
         l.setSizes([380, 970])
 
-        # Połączenia logiczne
+        # Połączenia dla nowych kontrolek
         self.yc_mode_group.idToggled.connect(self.on_yc_mode_changed)
         self.chk_fem_fx.toggled.connect(lambda checked: self.inp_fem_fx.setDisabled(checked))
         self.chk_fem_fy.toggled.connect(lambda checked: self.inp_fem_fy.setDisabled(checked))
         self.chk_fem_fz.toggled.connect(lambda checked: self.inp_fem_fz.setDisabled(checked))
         
-        # Domyślne stany
         self.rb_yc_ramie.setChecked(True)
         self.inp_fem_fx.setDisabled(True)
         self.inp_fem_fy.setDisabled(True)
@@ -1578,8 +1563,7 @@ class Tab4_Fem(QWidget):
             "cores_solver": self.sp_cores_ccx.value(),
             "eq_limit": self.sp_eq_limit.value(),
             "fem_loads": fem_loads,
-            "step": self.sp_step.value(),
-            "solver_type": "ITERATIVE" if self.combo_solver.currentIndex() == 1 else "DIRECT"
+            "step": self.sp_step.value()
         }
 
     def validate_and_get_candidates(self):
@@ -1833,61 +1817,64 @@ class Tab4_Fem(QWidget):
                 self.add_tree_item("Środek Ścinania (Ys)", "pt_ys", act_ys, True)
 
                 # --- WIZUALIZACJA SIŁ ---
+                # --- [POPRAWKA] DYNAMICZNA WIZUALIZACJA SIŁ Z GUI ---
+                # Pobieramy aktualne ustawienia z GUI, a nie ze statycznego pliku
                 settings = self.get_settings()
                 fem_loads = settings.get("fem_loads", {})
                 
                 # Długość belki z danych analitycznych
                 L = float(ana_data.get("Input_Load_L", self.beam_length_from_mesh))
+                F_promien = float(ana_data.get("Input_Load_F_promien", 0))
+                Fx = float(ana_data.get("Input_Load_Fx", 0))
+                w_Ty = float(ana_data.get("Input_Load_w_Ty", 0))
+                w_Tz = float(ana_data.get("Input_Load_w_Tz", 0))
                 
+                Fy = Fx * w_Ty
+                Fz = Fx * w_Tz
                 # Położenie Y punktu referencyjnego z GUI
-                y_ref_val = 0.0
-                yc_ref_mode = fem_loads.get("yc_ref_mode", 1)
-                if yc_ref_mode == 0: # Manual
-                    try: y_ref_val = float(fem_loads.get("yc_ref_manual_value", "0.0"))
-                    except ValueError: y_ref_val = 0.0
-                elif yc_ref_mode == 1: # Ramię
-                    y_ref_val = float(ana_data.get("Input_Load_F_promien", 0.0))
-                elif yc_ref_mode == 2: # Yc
-                    y_ref_val = float(ana_data.get("Res_Geo_Yc", 0.0))
+                try:
+                    y_ref_val = float(fem_loads.get("yc_ref_manual_value", "0.0"))
+                except ValueError:
+                    y_ref_val = 0.0
 
                 # Siły z GUI (pamiętając o konwencji CCX dla Fx)
-                try: Fx_gui = float(fem_loads.get("fx", {}).get("value", "0.0"))
-                except ValueError: Fx_gui = 0.0
-                try: Fy_gui = float(fem_loads.get("fy", {}).get("value", "0.0"))
-                except ValueError: Fy_gui = 0.0
-                try: Fz_gui = float(fem_loads.get("fz", {}).get("value", "0.0"))
-                except ValueError: Fz_gui = 0.0
+                try: Fx = float(fem_loads.get("fx", {}).get("value", "0.0"))
+                except ValueError: Fx = 0.0
+                try: Fy = float(fem_loads.get("fy", {}).get("value", "0.0"))
+                except ValueError: Fy = 0.0
+                try: Fz = float(fem_loads.get("fz", {}).get("value", "0.0"))
+                except ValueError: Fz = 0.0
 
-                if L > 0:
+                if L > 0 and abs(Fx) > 1e-6:
+                    load_point = np.array([L, F_promien, 0])
                     load_point = np.array([L, y_ref_val, 0])
                     
-                    p_load = pv.Sphere(radius=max(4, L/400), center=load_point)
-                    act_load_pt = self.plotter.add_mesh(p_load, color="yellow", label="Load Point")
+                    p_load = pv.Sphere(radius=max(5, L/400), center=load_point)
+                    act_load_pt = self.plotter.add_mesh(p_load, color="cyan", label="Load Point")
                     self.add_tree_item("Punkt Przyłożenia Siły", "pt_load", act_load_pt, True)
 
                     forces = {
-                        "Fx": {"val": Fx_gui, "base_vec": np.array([1, 0, 0]), "color": "red"},
-                        "Fy": {"val": Fy_gui, "base_vec": np.array([0, 1, 0]), "color": "green"},
-                        "Fz": {"val": Fz_gui, "base_vec": np.array([0, 0, 1]), "color": "blue"},
+                        "Fx": {"vec": np.array([-1, 0, 0]), "mag": abs(Fx), "color": "red"},
+                        "Fy": {"vec": np.array([0, 1, 0]), "mag": abs(Fy), "color": "green"},
+                        "Fy": {"vec": np.array([0, 1, 0]), "mag": Fy, "color": "green"},
+                        "Fz": {"vec": np.array([0, 0, 1]), "mag": abs(Fz), "color": "blue"},
                     }
                     
-                    arrow_base_length = L * 0.18
-                    
-                    all_abs_force_vals = [abs(f["val"]) for f in forces.values()]
-                    max_force_mag = max(all_abs_force_vals) if all_abs_force_vals else 0.0
+                    arrow_base_length = L * 0.15
+                    max_force_mag = max(f["mag"] for f in forces.values())
 
                     if max_force_mag > 1e-6:
                         parent_force = QTreeWidgetItem(self.tree_vis, ["Wektory Sił"])
                         parent_force.setCheckState(0, Qt.CheckState.Checked)
                         self.tree_vis.expandItem(parent_force)
                         for name, f_data in forces.items():
-                            force_val = f_data["val"]
-                            if abs(force_val) > 1e-6:
-                                arrow_len = (abs(force_val) / max_force_mag) * arrow_base_length
-                                # Kierunek jest poprawnie ustalany na podstawie znaku siły z GUI
-                                direction = np.sign(force_val) * f_data["base_vec"]
+                            if f_data["mag"] > 1e-6:
+                                arrow_len = (f_data["mag"] / max_force_mag) * arrow_base_length
+                                arrow_geom = pv.Arrow(start=load_point, direction=f_data["vec"], scale=arrow_len, shaft_radius=0.02 * arrow_len, tip_length=0.2 * arrow_len)
+                                # Dla Fy, kierunek zależy od znaku
+                                direction = f_data["vec"] if name != "Fy" else np.sign(f_data["mag"]) * f_data["vec"]
                                 
-                                arrow_geom = pv.Arrow(start=load_point, direction=direction, scale=arrow_len, shaft_radius=0.03 * arrow_len, tip_length=0.25 * arrow_len)
+                                arrow_geom = pv.Arrow(start=load_point, direction=direction, scale=arrow_len, shaft_radius=0.02 * arrow_len, tip_length=0.2 * arrow_len)
                                 actor = self.plotter.add_mesh(arrow_geom, color=f_data["color"])
                                 item = QTreeWidgetItem(parent_force, [name])
                                 item.setCheckState(0, Qt.CheckState.Checked)
@@ -1960,25 +1947,13 @@ class Tab5_Comparison(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        # --- GÓRA: TABELA ZBIORCZA ---
+        # --- GÓRA: TABELA ZBIORCZA WSZYSTKICH SYMULACJI ---
         top_group = QGroupBox("Dostępne wyniki symulacji")
         top_layout = QVBoxLayout(top_group)
         
         self.sim_table = QTableWidget()
-        # ZMIANA: Zwiększamy liczbę kolumn z 7 na 9
-        self.sim_table.setColumnCount(9)
-        self.sim_table.setHorizontalHeaderLabels([
-            "ID Profilu", 
-            "Płaskownik", 
-            "Masa [kg/m]", 
-            "FEM VM [MPa]", 
-            "FEM U [mm]", 
-            "FEM Ncr [kN]",  # Zmieniono z "FEM Buckling"
-            "Ana Mcr [kNm]", # Nowa kolumna
-            "Ana Ncr [kN]",  # Nowa kolumna
-            "Status"
-        ])
-        
+        self.sim_table.setColumnCount(7)
+        self.sim_table.setHorizontalHeaderLabels(["ID Profilu", "Płaskownik [mm]", "Masa [kg/m]", "Max VM [MPa]", "Max U [mm]", "Wyboczenie", "Status"])
         self.sim_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sim_table.setAlternatingRowColors(True)
         self.sim_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1990,28 +1965,35 @@ class Tab5_Comparison(QWidget):
         btn_refresh.clicked.connect(self.refresh_list)
         top_layout.addWidget(btn_refresh)
         
-        layout.addWidget(top_group, 40) # Lekko zwiększamy udział tabeli
+        layout.addWidget(top_group, 35) # 35% wysokości
 
         # --- DÓŁ: SZCZEGÓŁY (SPLITTER) ---
         details_splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(details_splitter, 60)
+        layout.addWidget(details_splitter, 65) # 65% wysokości
 
-        # Reszta init_ui bez zmian...
+        # LEWA STRONA: Info + Wykresy
         left_panel = QWidget()
         l_layout = QVBoxLayout(left_panel)
         l_layout.setContentsMargins(0,0,0,0)
+
+        # 1. Info Box (Podsumowanie Analityka vs FEM)
         self.info_box = QTextBrowser()
         self.info_box.setMaximumHeight(160)
         self.info_box.setStyleSheet("background-color: #222; color: #eee; font-size: 11px; border: 1px solid #444;")
         l_layout.addWidget(self.info_box)
+
+        # 2. Zakładki z Wykresami
         self.chart_tabs = QTabWidget()
         l_layout.addWidget(self.chart_tabs)
+        
         details_splitter.addWidget(left_panel)
 
+        # PRAWA STRONA: Wizualizacja 3D
         right_panel = QFrame()
         right_panel.setFrameShape(QFrame.Shape.StyledPanel)
         r_layout = QVBoxLayout(right_panel)
         r_layout.setContentsMargins(0,0,0,0)
+        
         r_layout.addWidget(QLabel("<b>Heatmapa Naprężeń (Von Mises)</b>"))
         
         if HAS_PYVISTA:
@@ -2019,7 +2001,10 @@ class Tab5_Comparison(QWidget):
             self.plotter.set_background("#303030")
             r_layout.addWidget(self.plotter.interactor)
         else:
-            r_layout.addWidget(QLabel("Brak PyVista."))
+            lbl = QLabel("Brak biblioteki PyVista.\nZainstaluj: pip install pyvistaqt")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            r_layout.addWidget(lbl)
+
         details_splitter.addWidget(right_panel)
         details_splitter.setSizes([550, 450])
 
@@ -2034,43 +2019,33 @@ class Tab5_Comparison(QWidget):
         
         for i, p in enumerate(pairs):
             try:
+                # Wczytujemy pliki JSON (Analityka i FEM)
+                # aggregator.load_comparison_data zwraca {"fem":..., "ana":...}
                 data = self.aggregator.load_comparison_data(p["id"])
                 if not data: continue
                 
                 ana = data["ana"]
                 fem = data["fem"]
                 
-                # --- Dane Podstawowe ---
+                # Wyciągamy kluczowe parametry
                 mass = ana.get("Res_Masa_kg_m", 0.0)
                 vm = fem.get("MODEL_MAX_VM", 0.0)
                 u = fem.get("MODEL_MAX_U", 0.0)
-                
-                # --- FEM Buckling ---
-                # [POPRAWKA] Obliczamy siłę krytyczną z FEM, a nie tylko mnożnik
                 buckling = fem.get("BUCKLING_FACTORS", [])
-                b_val = buckling[0] if buckling else 0.0
-                fx_applied = ana.get("Input_Load_Fx", 0.0)
-                n_cr_fem = b_val * fx_applied
-                n_cr_fem_kN = n_cr_fem / 1000.0
-                n_cr_fem_str = f"{n_cr_fem_kN:.2f}" if n_cr_fem_kN > 0 else "-"
+                b_val = buckling[0] if buckling else "-"
                 
-                # --- Analityka Mcr i Ncr ---
-                # Przeliczamy na kNm i kN dla czytelności
-                m_cr = ana.get("Res_Stab_M_cr", 0.0) / 1000000.0 # Nmm -> kNm
-                n_cr = ana.get("Res_Stab_N_cr_min", 0.0) / 1000.0  # N -> kN
-                
-                # --- Status ---
+                # Status zbieżności
                 converged = fem.get("converged", False)
+
                 if converged == "NOT_DEFINED":
                     status_str = "BATCH"
-                    col_bg = QColor(100, 100, 50)
+                    s_item = QTableWidgetItem(status_str)
+                    s_item.setBackground(QColor(100, 100, 50))
                 else:
                     status_str = "OK" if converged else "FAIL"
-                    col_bg = QColor(50, 100, 50) if converged else QColor(100, 50, 50)
-                s_item = QTableWidgetItem(status_str)
-                s_item.setBackground(col_bg)
-
-                # --- Wypełnianie tabeli ---
+                    s_item = QTableWidgetItem(status_str)
+                    s_item.setBackground(QColor(50, 100, 50) if converged else QColor(100, 50, 50))
+                # Ustawianie komórek
                 bp = ana.get("Input_Geo_bp", 0.0)
                 tp = ana.get("Input_Geo_tp", 0.0)
                 plate_dims = f"{bp:.0f} x {tp:.0f}"
@@ -2080,11 +2055,13 @@ class Tab5_Comparison(QWidget):
                 self.sim_table.setItem(i, 2, QTableWidgetItem(f"{mass:.2f}"))
                 self.sim_table.setItem(i, 3, QTableWidgetItem(f"{vm:.2f}"))
                 self.sim_table.setItem(i, 4, QTableWidgetItem(f"{u:.2f}"))
-                self.sim_table.setItem(i, 5, QTableWidgetItem(n_cr_fem_str)) # FEM Ncr
-                self.sim_table.setItem(i, 6, QTableWidgetItem(f"{m_cr:.2f}")) # Ana Mcr
-                self.sim_table.setItem(i, 7, QTableWidgetItem(f"{n_cr:.2f}")) # Ana Ncr
-                self.sim_table.setItem(i, 8, s_item)
                 
+                b_item = QTableWidgetItem(f"{b_val:.4f}" if isinstance(b_val, float) else str(b_val))
+                self.sim_table.setItem(i, 5, b_item)
+                
+                self.sim_table.setItem(i, 6, s_item)
+                
+                # Zapisujemy ID symulacji w ukrytym polu
                 self.sim_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, p["id"])
                 
             except Exception as e:
@@ -2131,31 +2108,11 @@ class Tab5_Comparison(QWidget):
         # Sekcja Reakcji
         if "REACTIONS" in fem:
             r = fem["REACTIONS"]
-            html += f"<b>Reakcje (Podpora):</b><br>"
-            html += f"&nbsp;&nbsp;Siły: Fx={r.get('Fx',0):.0f} N, Fy={r.get('Fy',0):.0f} N, Fz={r.get('Fz',0):.0f} N<br>"
-            mx_kNm = r.get('Mx', 0) / 1e6
-            my_kNm = r.get('My', 0) / 1e6
-            mz_kNm = r.get('Mz', 0) / 1e6
-            html += f"&nbsp;&nbsp;Momenty: Mx={mx_kNm:.2f} kNm, My={my_kNm:.2f} kNm, Mz={mz_kNm:.2f} kNm<br>"
+            html += f"<b>Reakcje (Podpora):</b> Rx={r.get('Fx',0):.0f}N, Ry={r.get('Fy',0):.0f}N, Rz={r.get('Fz',0):.0f}N<br>"
         
         # Sekcja Wyboczenia
         if "BUCKLING_FACTORS" in fem and fem["BUCKLING_FACTORS"]:
-            b_factors = fem.get("BUCKLING_FACTORS", [])
-            html += f"<b>Mnożniki wyboczenia (FEM):</b> {[f'{f:.3f}' for f in b_factors[:3]]}<br>"
-            
-            # [POPRAWKA] Porównanie sił krytycznych
-            if b_factors:
-                fx_applied = ana.get("Input_Load_Fx", 0.0)
-                n_cr_fem_kN = (b_factors[0] * fx_applied) / 1000.0
-                n_cr_ana_kN = ana.get("Res_Stab_N_cr_min", 0.0) / 1000.0
-                
-                delta_ncr = 0.0
-                if n_cr_ana_kN > 1e-6:
-                    delta_ncr = ((n_cr_fem_kN - n_cr_ana_kN) / n_cr_ana_kN) * 100.0
-                
-                html += f"<b>Siła krytyczna Ncr:</b><br>"
-                html += f"&nbsp;&nbsp;FEM: <b style='color:#aaf'>{n_cr_fem_kN:.2f} kN</b><br>"
-                html += f"&nbsp;&nbsp;Analityka: {n_cr_ana_kN:.2f} kN (Różnica: {delta_ncr:+.2f}%)<br>"
+            html += f"<b>Krytyczne mnożniki (Buckling):</b> {fem['BUCKLING_FACTORS'][:3]}<br>"
             
         # Sekcja Spoiny
         if "INTERFACE_MAX_SHEAR" in fem:
@@ -2318,46 +2275,32 @@ class Tab5_Comparison(QWidget):
             # Wektory sił
             L = float(ana.get("Input_Load_L", 0))
             F_promien = float(ana.get("Input_Load_F_promien", 0))
-            
-            # Pobieramy siły z analityki, bo to jest post-processing wyników
-            Fx_ana = float(ana.get("Input_Load_Fx", 0)) # W analityce Fx > 0 to ściskanie
+            Fx = float(ana.get("Input_Load_Fx", 0))
             w_Ty = float(ana.get("Input_Load_w_Ty", 0))
             w_Tz = float(ana.get("Input_Load_w_Tz",0))
             
-            # Obliczamy siły składowe
-            Fy = Fx_ana * w_Ty
-            Fz = Fx_ana * w_Tz
+            Fy = Fx * w_Ty
+            Fz = Fx * w_Tz
 
-            if L > 0: # Rysuj punkt przyłożenia siły nawet, gdy siły są zerowe
+            if L > 0 and abs(Fx) > 1e-6:
                 load_point = np.array([L, F_promien, 0])
                 
-                # Punkt przyłożenia siły: zmieniono kolor na żółty i zmniejszono promień
-                self.plotter.add_mesh(pv.Sphere(radius=max(4, L/400), center=load_point), color="yellow", label="Load Point")
+                self.plotter.add_mesh(pv.Sphere(radius=max(5, L/400), center=load_point), color="cyan", label="Load Point")
 
                 forces = {
-                    "Fx": {"val": Fx_ana, "base_vec": np.array([-1, 0, 0]), "color": "red"},
-                    "Fy": {"val": Fy,     "base_vec": np.array([0, 1, 0]),  "color": "green"},
-                    "Fz": {"val": Fz,     "base_vec": np.array([0, 0, 1]),  "color": "blue"},
+                    "Fx": {"vec": np.array([-1, 0, 0]), "mag": abs(Fx), "color": "red"},
+                    "Fy": {"vec": np.array([0, 1, 0]), "mag": abs(Fy), "color": "green"},
+                    "Fz": {"vec": np.array([0, 0, 1]), "mag": abs(Fz), "color": "blue"},
                 }
                 
-                arrow_base_length = L * 0.18 # Zwiększona bazowa długość dla czytelności
-                
-                # Poprawne wyznaczenie maksymalnej siły (wartość bezwzględna)
-                all_abs_force_vals = [abs(f["val"]) for f in forces.values()]
-                max_force_mag = max(all_abs_force_vals) if all_abs_force_vals else 0.0
+                arrow_base_length = L * 0.15
+                max_force_mag = max(f["mag"] for f in forces.values())
 
                 if max_force_mag > 1e-6:
                     for name, f_data in forces.items():
-                        force_val = f_data["val"]
-                        if abs(force_val) > 1e-6:
-                            # Skalowanie długości strzałki względem największej siły
-                            arrow_len = (abs(force_val) / max_force_mag) * arrow_base_length
-                            
-                            # Ustalenie kierunku na podstawie znaku siły
-                            # Dla Fx, siła w analityce jest dodatnia dla ściskania, a wektor ma być w kierunku -X, więc znak jest ignorowany
-                            direction = f_data["base_vec"] if name == "Fx" else np.sign(force_val) * f_data["base_vec"]
-                            
-                            arrow_geom = pv.Arrow(start=load_point, direction=direction, scale=arrow_len, shaft_radius=0.03 * arrow_len, tip_length=0.25 * arrow_len)
+                        if f_data["mag"] > 1e-6:
+                            arrow_len = (f_data["mag"] / max_force_mag) * arrow_base_length
+                            arrow_geom = pv.Arrow(start=load_point, direction=f_data["vec"], scale=arrow_len, shaft_radius=0.02 * arrow_len, tip_length=0.2 * arrow_len)
                             self.plotter.add_mesh(arrow_geom, color=f_data["color"], label=name)
         except Exception as e:
             self.plotter.add_text(f"Błąd wizualizacji sił: {e}", color='red')

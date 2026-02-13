@@ -238,7 +238,7 @@ class FemEngine:
         
         solver_type = run_params.get("solver_type", "DIRECT")
         if solver_type == "ITERATIVE":
-            deck.append("*STATIC, SOLVER=ITERATIVE SCALING, CHI=1e-8")
+            deck.append("*STATIC, SOLVER=ITERATIVE, CHI=1e-8")
         else:
             deck.append("*STATIC")
         
@@ -338,7 +338,8 @@ class FemEngine:
         buckling_factors = []
 
         # Nowe zmienne do parsowania sumarycznych reakcji
-        capturing_reactions = False
+        solver_total_rf = None
+        capturing_total_rf = False
         current_step = 0
 
         current_type = None
@@ -364,27 +365,24 @@ class FemEngine:
                     except: pass
                     continue
                 
-                # --- [POPRAWKA] Bardziej niezawodne parsowanie reakcji podporowych ---
-                if "forces (rf) applied to nodes of set nset_surf_support" in l_low:
-                    capturing_reactions = True
-                    current_type = None # Wyłączamy inne parsery, aby uniknąć konfliktów
-                    continue
-
-                if capturing_reactions:
-                    if "internal node number" in l_low:
-                        continue # Pomiń linię nagłówka
+                # --- [FIX] Parsowanie TOTAL FORCE z CalculiX (Najdokładniejsza metoda) ---
+                if current_step == 1:
+                    # Szukamy nagłówka "total force ... for set NSET_SURF_SUPPORT"
+                    if "total force" in l_low and "nset_surf_support" in l_low:
+                        capturing_total_rf = True
+                        continue # Przejdź do następnej linii, gdzie są liczby
                     
-                    parts = line.split()
-                    if not parts or not parts[0].isdigit():
-                        capturing_reactions = False # Koniec bloku reakcji
-                    else:
-                        try:
-                            nid = int(parts[0])
-                            vals = [float(x) for x in parts[1:]]
-                            data_force[nid] = vals
-                        except ValueError:
-                            capturing_reactions = False
-                        continue # Linia została przetworzona, przejdź do następnej
+                    if capturing_total_rf:
+                        parts = line.split()
+                        # Oczekujemy 3 liczb: fx, fy, fz
+                        if len(parts) >= 3:
+                            try:
+                                # Nadpisujemy jeśli znaleziono
+                                solver_total_rf = [float(parts[0]), float(parts[1]), float(parts[2])]
+                            except: pass
+                        capturing_total_rf = False # Jednorazowy odczyt
+                        continue
+                # -------------------------------------------------------------------------
 
                 if "displacements" in l_low:
                     if not disp_parsed_header:
@@ -400,10 +398,13 @@ class FemEngine:
                     else:
                         current_type = None 
                     continue
+                if "forces" in l_low:
+                    current_type = 'force'
+                    continue
 
                 parts = line.split()
                 if not parts or not parts[0].isdigit():
-                    if current_type in ['disp', 'stress']:
+                    if current_type in ['disp', 'stress', 'force']:
                         current_type = None
                     continue
                 
@@ -420,6 +421,7 @@ class FemEngine:
                         vm = math.sqrt(0.5 * ((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
                         s_comps.append(vm)
                         raw_elem_stress[nid] = s_comps
+                elif current_type == 'force': data_force[nid] = vals
 
         # --- UŚREDNIANIE WĘZŁOWE (NODAL AVERAGING) ---
         data_stress = {}
@@ -453,26 +455,18 @@ class FemEngine:
 
         # --- OBLICZENIA WYNIKOWE ---
         
-        # --- [POPRAWKA] Obliczanie sumarycznych reakcji i momentów podporowych ---
-        total_rf = [0.0, 0.0, 0.0]  # Fx, Fy, Fz
-        total_rm = [0.0, 0.0, 0.0]  # Mx, My, Mz (wokół początku układu 0,0,0)
-
-        if self.mapper and self.mapper.loaded:
+        # Priorytet: Użyj Total Force z Solvera, jeśli znaleziono
+        if solver_total_rf:
+            total_rf = solver_total_rf
+        else:
+            # Fallback: Ręczne sumowanie (podatne na błędy doboru węzłów)
+            total_rf = [0.0, 0.0, 0.0]
             support_ids = set(self.support_nodes)
-            for nid, rf_vals in data_force.items():
-                if nid in support_ids and len(rf_vals) >= 3:
-                    # 1. Sumowanie sił
-                    fx, fy, fz = rf_vals[0], rf_vals[1], rf_vals[2]
-                    total_rf[0] += fx
-                    total_rf[1] += fy
-                    total_rf[2] += fz
-
-                    # 2. Obliczanie momentów (Moment = r x F)
-                    if nid in self.mapper.node_map_dict:
-                        x, y, z = self.mapper.node_map_dict[nid]
-                        total_rm[0] += (y * fz - z * fy)  # Moment skręcający Mx
-                        total_rm[1] += (z * fx - x * fz)  # Moment gnący My
-                        total_rm[2] += (x * fy - y * fx)  # Moment gnący Mz
+            for nid, rf in data_force.items():
+                if nid in support_ids:
+                    total_rf[0] += rf[0]
+                    total_rf[1] += rf[1]
+                    total_rf[2] += rf[2]
                 
         phi_deg = 0.0
         if self.load_nodes and data_disp:
@@ -532,14 +526,7 @@ class FemEngine:
             "MODEL_MAX_VM": max_vm,
             "MODEL_MAX_U": max_u,
             "BUCKLING_FACTORS": buckling_factors,
-            "REACTIONS": {
-                "Fx": total_rf[0], 
-                "Fy": total_rf[1], 
-                "Fz": total_rf[2],
-                "Mx": total_rm[0],
-                "My": total_rm[1],
-                "Mz": total_rm[2]
-            },
+            "REACTIONS": {"Fx": total_rf[0], "Fy": total_rf[1], "Fz": total_rf[2]},
             "ROTATIONS": {"Rx": math.radians(phi_deg)},
             "INTERFACE_DATA": int_data,
             "INTERFACE_MAX_SHEAR": max_tau,

@@ -23,8 +23,13 @@ class FemOptimizer:
         except (ValueError, TypeError):
             return 0.0
 
-    def run_single_candidate(self, candidate_data, fem_settings, signal_callback=None):
-        """Uruchamia proces optymalizacji (Mesh -> Solve -> Check -> MeshRefine) dla jednego profilu."""
+    def run_single_candidate(self, candidate_data, fem_settings, signal_callback=None, interaction_callback=None):
+        """
+        Uruchamia proces optymalizacji (Mesh -> Solve -> Check -> MeshRefine) dla jednego profilu.
+        
+        Dodano interaction_callback: funkcja wywoływana, gdy przekroczony zostanie limit równań.
+        Powinna zwracać: "STOP" lub "ITERATIVE".
+        """
         # Wrapper do logowania - wysyła sygnał do GUI lub drukuje w konsoli
         def log(msg): 
             if signal_callback: signal_callback(msg)
@@ -45,6 +50,9 @@ class FemOptimizer:
         # Pobranie limitu równań z ustawień (domyślnie 2 miliony)
         eq_limit = int(fem_settings.get("eq_limit", 2000000))
 
+        # Flaga wymuszenia solvera iteracyjnego
+        force_iterative = False
+        
         # Parametry v3.0 (Strefy i Sondy)
         fem_loads_settings = fem_settings.get("fem_loads", {})
         ref_zones = fem_settings.get("refinement_zones", [])
@@ -140,19 +148,38 @@ class FemOptimizer:
                 log("  ! Błąd generowania geometrii/siatki. Przerywam profil.")
                 break
 
-            # >>> ZMIANA: Sprawdzanie limitu równań i ostrzeżenie <<<
+            # >>> NOWOŚĆ: SPRAWDZANIE LIMITU I INTERAKCJA <<<
             node_count = meta.get('stats', {}).get('nodes', 0)
             est_equations = node_count * 3 # 3 stopnie swobody na węzeł
             
+            # Logowanie statystyk siatki dla panelu statusu
             log(f"||| [Węzły Siatki: {node_count:,}]".replace(',', ' '))
             log(f"||| [Układ Równań: ~{est_equations / 1e6:.2f} M]")
 
-            if est_equations > eq_limit:
-                log(f"  ! UWAGA: Przekroczono limit {eq_limit/1e6:.1f}M równań. Model ma ~{est_equations/1e6:.1f}M równań.")
-                log(f"  ! ZAGĘŚĆ SIATKĘ: Ryzyko błędu krytycznego z powodu braku pamięci RAM.")
+            # Sprawdzamy limit TYLKO jeśli nie wymuszono już solvera iteracyjnego
+            if est_equations > eq_limit and not force_iterative:
+                log(f"  ! LIMIT: Model ma ~{est_equations/1e6:.1f}M równań (Limit: {eq_limit/1e6:.1f}M).")
+                
+                if interaction_callback:
+                    # Wywołujemy callback GUI i czekamy na odpowiedź
+                    decision = interaction_callback(est_equations, last_vm)
+                    
+                    if decision == "STOP":
+                        log("  ! Decyzja użytkownika: STOP. Zatrzymuję na poprzednim wyniku.")
+                        # Przepisujemy poprzedni wynik jako finalny (jeśli istnieje)
+                        if i > 1:
+                            converged = False # Wymuszone zatrzymanie
+                            final_res['note'] = "User stopped at limit"
+                        break
+                        
+                    elif decision == "ITERATIVE":
+                        log("  ! Decyzja użytkownika: Zmiana na SOLVER ITERACYJNY i kontynuacja.")
+                        force_iterative = True
+                    else:
+                        log("  ! Decyzja nieznana, kontynuuję ryzyzykownie (Direct)...")
 
             # Wybór solvera do tego przebiegu
-            current_solver_type = fem_settings.get("solver_type", "DIRECT")
+            current_solver_type = "ITERATIVE" if force_iterative else "DIRECT"
             
             # --- 2. FEM SOLVER (FIZYKA & MATERIAŁ) ---
             
