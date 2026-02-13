@@ -6,9 +6,9 @@ import sys
 import shutil
 import json
 import time
-import material_catalogue  # Import Twojej bazy materiałowej
+import material_catalogue  # Twoja baza materiałowa
 
-# Próba importu numpy (zalecane do szybszych obliczeń)
+# Próba importu numpy dla szybszych obliczeń (opcjonalnie)
 try:
     import numpy as np
     HAS_NUMPY = True
@@ -16,91 +16,112 @@ except ImportError:
     HAS_NUMPY = False
 
 class FemEngineShell:
+    """
+    Silnik FEM dedykowany dla modeli powłokowych (Shell).
+    Generuje inputy dla CalculiX (CCX), uruchamia solver i parsuje wyniki.
+    Obsługuje:
+    - Statykę (Step 1)
+    - Wyboczenie (Step 2)
+    - Fizyczne ramię siły (Rigid Arm)
+    """
     def __init__(self, ccx_path="ccx"):
         self.ccx_path = ccx_path
         self.work_dir = ""
         
-        # Przechowalnia kluczowych danych z geometrii
+        # Przechowalnia danych o grupach i węzłach z geometrii
         self.groups = {}
-        self.nodes_map = {} # id -> [x, y, z]
+        self.nodes_map = {} 
         
-        # [NOWOŚĆ] Zapamiętujemy ID węzła referencyjnego (końca belki)
-        # Służy do wyciągnięcia ugięcia bez mapowania całej siatki
-        self.ref_node_id = None 
+        # ID kluczowych węzłów (ustalane dynamicznie)
+        self.ref_node_structure = None  # Węzeł "A": Środek ciężkości przekroju (Rigid Body Master)
+        self.ref_node_load = None       # Węzeł "B": Punkt przyłożenia siły (Load Point)
 
     def _load_metadata(self, base_path_no_ext):
-        """Wczytuje mapę węzłów i grupy z plików JSON/CSV wygenerowanych przez geometrię."""
+        """
+        Wczytuje metadane (grupy węzłów, mapę ID) wygenerowane przez engine_geometry_shell.
+        Pliki: *_groups.json, *_nodes.csv
+        """
         groups_path = f"{base_path_no_ext}_groups.json"
         nodes_path = f"{base_path_no_ext}_nodes.csv"
         
-        # 1. Wczytanie grup węzłów (Support, Load, Weld Lines)
+        # 1. Wczytanie grup (NSET)
         if os.path.exists(groups_path):
-            with open(groups_path, 'r') as f:
-                self.groups = json.load(f)
+            try:
+                with open(groups_path, 'r') as f:
+                    self.groups = json.load(f)
+            except Exception as e:
+                print(f"[FEM-SHELL] Error loading groups: {e}")
         
-        # 2. Wczytanie węzłów (potrzebujemy tylko max_id)
+        # 2. Wczytanie mapy węzłów (głównie potrzebujemy max_id)
         self.nodes_map = {}
         if os.path.exists(nodes_path):
-            with open(nodes_path, 'r') as f:
-                reader = csv.reader(f)
-                next(reader) # Skip header
-                for row in reader:
-                    if row:
-                        self.nodes_map[int(row[0])] = [float(row[1]), float(row[2]), float(row[3])]
+            try:
+                with open(nodes_path, 'r') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None) 
+                    for row in reader:
+                        if row:
+                            nid = int(row[0])
+                            # [x, y, z]
+                            self.nodes_map[nid] = [float(row[1]), float(row[2]), float(row[3])]
+            except Exception as e:
+                print(f"[FEM-SHELL] Error loading nodes: {e}")
 
     def prepare_calculix_deck(self, inp_path, run_params):
         """
-        Tworzy plik startowy .inp dla CalculiX na podstawie siatki i parametrów.
-        Integruje dane z material_catalogue.
+        Główna metoda tworząca plik .inp.
+        Łączy siatkę (Mesh), Materiały, Sekcje, Wiązania (TIE/Rigid) i Kroki (Steps).
         """
         if not os.path.exists(inp_path):
             return None
         
         self.work_dir = os.path.dirname(inp_path)
         base_name = os.path.splitext(os.path.basename(inp_path))[0]
-        # Usuwamy ewentualny sufiks "_run_..." żeby znaleźć pliki geometrii
+        # Usuwamy sufiksy czasowe, by znaleźć plik geometrii bazowej
         base_geo_name = base_name.split("_run_")[0]
         base_full_path = os.path.join(self.work_dir, base_geo_name)
         
+        # Ładujemy dane o grupach z geometrii
         self._load_metadata(base_full_path)
         
-        # Czytamy oryginalny plik .inp z siatką (węzły i elementy)
+        # Czytamy siatkę wygenerowaną przez Gmsh
         with open(inp_path, 'r') as f:
             mesh_content = f.read()
 
         deck = []
-        deck.append("** CALCULIX DECK FOR SHELL MODEL (Merged Version) **")
+        deck.append("** ==================================================================")
+        deck.append("** CALCULIX DECK FOR SHELL MODEL (Rigid Arm Version)")
+        deck.append(f"** Timestamp: {time.ctime()}")
+        deck.append("** ==================================================================")
         deck.append(mesh_content)
         
-        # --- 1. DEFINICJA NODE SETÓW (GRUP) ---
-        # Przepisujemy grupy z JSON do formatu *NSET w pliku .inp
+        # --- 1. DEFINICJA NODE SETÓW Z GEOMETRII ---
+        deck.append("** --- GRUPY WĘZŁÓW (IMPORTOWANE) ---")
         for g_name, nodes in self.groups.items():
             if nodes:
                 deck.append(f"*NSET, NSET={g_name}")
-                # Zapisujemy w blokach po 10 ID dla czytelności i limitów długości linii
+                # CalculiX lubi max 16 liczb w linii, dajemy bezpiecznie 10
                 for i in range(0, len(nodes), 10):
-                    chunk = nodes[i:i+10]
-                    deck.append(", ".join(map(str, chunk)))
+                    deck.append(", ".join(map(str, nodes[i:i+10])))
 
-        # Grupa wszystkich węzłów (dla outputu)
+        # Grupa wszystkich węzłów (do wizualizacji)
         max_id = max(self.nodes_map.keys()) if self.nodes_map else 100000
-        deck.append("*NSET, NSET=NALL, GENERATE")
-        deck.append(f"1, {max_id}, 1")
+        deck.append(f"*NSET, NSET=NALL, GENERATE\n1, {max_id}, 1")
 
-        # --- 2. MATERIAŁ (Z BAZY DANYCH) ---
-        # Pobieramy nazwę materiału przekazaną z GUI/Optymalizatora
-        mat_name = run_params.get("Stop", "S355")
+        # --- 2. MATERIAŁY (Z BAZY DANYCH) ---
+        deck.append("** --- MATERIAŁY ---")
         
-        # Pobieramy bazę
+        mat_name = run_params.get("Stop", "S355")
         mat_db = material_catalogue.baza_materialow()
         
         if mat_name in mat_db:
-            mat_data = mat_db[mat_name]
-            E_val = float(mat_data['E'])
-            G_val = float(mat_data['G'])
-            rho_kg_m3 = float(mat_data['rho'])
+            m = mat_db[mat_name]
+            E_val = float(m['E'])
+            G_val = float(m['G'])
+            rho_val = float(m['rho'])
+            Re_val = float(m.get('Re', 0.0))
             
-            # Obliczenie współczynnika Poissona (nu = E/2G - 1)
+            # Obliczenie współczynnika Poissona nu = E/(2G) - 1
             if G_val > 0:
                 nu_val = (E_val / (2.0 * G_val)) - 1.0
                 if not (0.0 < nu_val < 0.5): nu_val = 0.3
@@ -108,135 +129,157 @@ class FemEngineShell:
                 nu_val = 0.3
             
             # Konwersja gęstości: kg/m3 -> t/mm3 (jednostka spójna dla N/mm2)
-            rho_fem = rho_kg_m3 * 1.0e-9
+            # 1 kg/m3 = 1e-9 t/mm3 (np. stal 7850 -> 7.85e-9)
+            rho_fem = rho_val * 1.0e-9
             
-            comment = f"** Material from DB: {mat_name} (Re={mat_data.get('Re',0)})"
+            comment = f"** Material DB: {mat_name} (Re={Re_val}, E={E_val})"
         else:
             # Fallback
-            E_val = float(run_params.get("E", 210000.0))
-            nu_val = float(run_params.get("nu", 0.3))
-            rho_fem = 7.85e-9
-            comment = "** Material: GENERIC FALLBACK"
+            E_val, nu_val, rho_fem = 210000.0, 0.3, 7.85e-9
+            comment = "** Material: GENERIC FALLBACK (Steel)"
 
-        # Nazwa wewnętrzna używana w definicji sekcji
-        INTERNAL_MAT_NAME = "MAT_SHELL_DB"
-
-        deck.append(f"*MATERIAL, NAME={INTERNAL_MAT_NAME}")
+        # A) Materiał Konstrukcyjny (SHELL)
+        deck.append(f"*MATERIAL, NAME=MAT_SHELL")
         deck.append(comment)
         deck.append("*ELASTIC")
         deck.append(f"{E_val}, {nu_val}")
         deck.append("*DENSITY")
         deck.append(f"{rho_fem}")
 
-        # --- 3. SEKCJE POWŁOKOWE (*SHELL SECTION) ---
-        plate_data = run_params.get("plate_data", {})
-        profile_data = run_params.get("profile_data", {})
-        
-        # Pobieramy grubości
-        tp = float(plate_data.get("tp", 10.0))
-        twc = float(profile_data.get("twc", 6.0))
-        tfc = float(profile_data.get("tfc", 10.0))
-        
-        # Przypisanie sekcji
-        deck.append(f"*SHELL SECTION, ELSET=SHELL_PLATE, MATERIAL={INTERNAL_MAT_NAME}")
-        deck.append(f"{tp}")
-        deck.append(f"*SHELL SECTION, ELSET=SHELL_WEBS, MATERIAL={INTERNAL_MAT_NAME}")
-        deck.append(f"{twc}")
-        deck.append(f"*SHELL SECTION, ELSET=SHELL_FLANGES, MATERIAL={INTERNAL_MAT_NAME}")
-        deck.append(f"{tfc}")
+        # B) Materiał Sztywny (RIGID ARM BEAM)
+        # Używamy bardzo dużego modułu Younga i znikomej gęstości
+        deck.append(f"*MATERIAL, NAME=MAT_RIGID")
+        deck.append("** Super-stiff material for load arm")
+        deck.append("*ELASTIC")
+        deck.append(f"{E_val * 1000.0}, {nu_val}") # 1000x sztywniejszy
+        deck.append("*DENSITY")
+        deck.append("1.0e-12") # Prawie bezmasowy
 
-        # --- 4. WIĄZANIA SPOIN (*TIE) ---
-        # Tolerancja uwzględniająca mid-surfaces
-        gap = (tp + tfc) / 2.0
-        tie_tol = gap + 2.0 
+        # --- 3. SEKCJE POWŁOKOWE (*SHELL SECTION) ---
+        deck.append("** --- SEKCJE POWŁOKOWE ---")
+        pl = run_params.get("plate_data", {})
+        pr = run_params.get("profile_data", {})
+        
+        # Przypisanie grubości do grup elementów (ELSET generowane przez Gmsh)
+        deck.append(f"*SHELL SECTION, ELSET=SHELL_PLATE, MATERIAL=MAT_SHELL\n{pl.get('tp', 10.0)}")
+        deck.append(f"*SHELL SECTION, ELSET=SHELL_WEBS, MATERIAL=MAT_SHELL\n{pr.get('twc', 6.0)}")
+        deck.append(f"*SHELL SECTION, ELSET=SHELL_FLANGES, MATERIAL=MAT_SHELL\n{pr.get('tfc', 10.0)}")
+
+        # --- 4. WIĄZANIA (TIE - SPOINY) ---
+        deck.append("** --- WIĄZANIA (SPOINY) ---")
+        # Obliczamy tolerancję (luka między mid-surfaces)
+        gap = (float(pl.get('tp', 10.0)) + float(pr.get('tfc', 10.0))) / 2.0
+        tie_tol = gap + 5.0 # Margines bezpieczeństwa
         
         deck.append(f"*TIE, NAME=WELD_L, POSITION TOLERANCE={tie_tol}")
         deck.append("NSET_LINE_WELD_L_SLAVE, NSET_LINE_WELD_L_MASTER")
+        
         deck.append(f"*TIE, NAME=WELD_R, POSITION TOLERANCE={tie_tol}")
         deck.append("NSET_LINE_WELD_R_SLAVE, NSET_LINE_WELD_R_MASTER")
 
-        # --- 5. OBCIĄŻENIE (*RIGID BODY & REF NODE) ---
-        # Tworzymy nowy węzeł (Ref Node) w przestrzeni
-        # [ZMIANA] Przypisujemy do self.ref_node_id, aby parser mógł go użyć
-        self.ref_node_id = max_id + 1
+        # --- 5. UKŁAD WPROWADZANIA OBCIĄŻENIA (RIGID ARM) ---
+        deck.append("** --- MECHANIZM OBCIĄŻENIA (RIGID ARM) ---")
         
         L = float(run_params.get("Length", 1000.0))
-        y_ref = float(run_params.get("Y_ref_node", 0.0))
+        y_centroid = float(run_params.get("Y_structure_center", 0.0))
+        y_load = float(run_params.get("Y_load_level", 0.0))
+        
+        # Nowe ID węzłów
+        self.ref_node_structure = max_id + 1
+        self.ref_node_load = max_id + 2
         
         deck.append("*NODE")
-        deck.append(f"{self.ref_node_id}, {L}, {y_ref}, 0.0")
+        # Węzeł A: Środek Ciężkości Struktury (tutaj mierzymy ugięcie)
+        deck.append(f"{self.ref_node_structure}, {L}, {y_centroid}, 0.0")
+        # Węzeł B: Punkt Przyłożenia Siły (ramię siły)
+        deck.append(f"{self.ref_node_load}, {L}, {y_load}, 0.0")
         
-        # Definiujemy Rigid Body (Sztywne połączenie)
-        deck.append(f"*RIGID BODY, NSET=NSET_LOAD, REF NODE={self.ref_node_id}")
+        # A) Rigid Body: Wiąże koniec powłok (NSET_LOAD) z węzłem A
+        # NSET_LOAD to krawędź końcowa powłok (zdefiniowana w geometrii)
+        deck.append(f"*RIGID BODY, NSET=NSET_LOAD, REF NODE={self.ref_node_structure}")
         
-        # Tworzymy NSET dla Ref Node, żeby łatwo poprosić o output
-        deck.append(f"*NSET, NSET=REF_NODE_SET")
-        deck.append(f"{self.ref_node_id}")
+        # B) Element Belkowy (B31): Łączy węzeł A z węzłem B
+        elem_id_beam = 1000000 # Bezpieczne wysokie ID
+        deck.append(f"*ELEMENT, TYPE=B31, ELSET=EL_RIGID_ARM")
+        deck.append(f"{elem_id_beam}, {self.ref_node_structure}, {self.ref_node_load}")
+        
+        # Sekcja belki (fikcyjna, sztywna)
+        deck.append(f"*BEAM SECTION, ELSET=EL_RIGID_ARM, MATERIAL=MAT_RIGID, SECTION=RECT")
+        deck.append("50.0, 50.0")   # Wymiary przekroju belki (nieistotne przy MAT_RIGID)
+        deck.append("1.0, 0.0, 0.0") # Wektor orientacji lokalnej osi 1 (wzdłuż X)
 
-        # --- 6. KROK 1: STATYKA ---
+        # Tworzymy grupy dla outputu
+        deck.append(f"*NSET, NSET=REF_NODE_STRUCT\n{self.ref_node_structure}")
+
+        # --- 6. STEP 1: STATYKA ---
+        deck.append("** --- KROK 1: STATYKA ---")
         deck.append("*STEP")
         deck.append("*STATIC")
         
-        # Warunki brzegowe
+        # Warunki brzegowe (Utwierdzenie na początku X=0)
         deck.append("*BOUNDARY")
-        deck.append("NSET_SUPPORT, 1, 6, 0.0")
+        deck.append("NSET_NSET_SUPPORT, 1, 6, 0.0")
         
-        # Siły skupione (CLOAD)
+        # Siły skupione (CLOAD) przykładane do WĘZŁA B (Load Point)
         deck.append("*CLOAD")
+        fx, fy, fz = float(run_params.get("Fx",0)), float(run_params.get("Fy",0)), float(run_params.get("Fz",0))
+        mx, my, mz = float(run_params.get("Mx",0)), float(run_params.get("My",0)), float(run_params.get("Mz",0))
         
-        fx = float(run_params.get("Fx", 0.0))
-        fy = float(run_params.get("Fy", 0.0))
-        fz = float(run_params.get("Fz", 0.0))
-        mx = float(run_params.get("Mx", 0.0))
-        my = float(run_params.get("My", 0.0))
-        mz = float(run_params.get("Mz", 0.0))
+        target = self.ref_node_load # <-- Siła działa na ramię
         
-        if abs(fx) > 1e-9: deck.append(f"{self.ref_node_id}, 1, {fx}")
-        if abs(fy) > 1e-9: deck.append(f"{self.ref_node_id}, 2, {fy}")
-        if abs(fz) > 1e-9: deck.append(f"{self.ref_node_id}, 3, {fz}")
-        if abs(mx) > 1e-9: deck.append(f"{self.ref_node_id}, 4, {mx}")
-        if abs(my) > 1e-9: deck.append(f"{self.ref_node_id}, 5, {my}")
-        if abs(mz) > 1e-9: deck.append(f"{self.ref_node_id}, 6, {mz}")
+        if abs(fx)>1e-9: deck.append(f"{target}, 1, {fx}")
+        if abs(fy)>1e-9: deck.append(f"{target}, 2, {fy}")
+        if abs(fz)>1e-9: deck.append(f"{target}, 3, {fz}")
+        if abs(mx)>1e-9: deck.append(f"{target}, 4, {mx}")
+        if abs(my)>1e-9: deck.append(f"{target}, 5, {my}")
+        if abs(mz)>1e-9: deck.append(f"{target}, 6, {mz}")
 
         # Output Requests
-        deck.append("*NODE PRINT, NSET=NSET_SUPPORT, TOTAL=YES")
-        deck.append("RF")
-        
-        # [KLUCZOWE] Prośba o wyniki dla węzła referencyjnego
-        deck.append("*NODE PRINT, NSET=REF_NODE_SET")
+        # 1. Przemieszczenie węzła strukturalnego (do porównania z analityką)
+        deck.append("*NODE PRINT, NSET=REF_NODE_STRUCT")
         deck.append("U")
-        
-        # Naprężenia w elementach (dla Max VM)
-        deck.append("*EL PRINT")
+        # 2. Reakcje w podporze (Total Force) - dla sprawdzenia bilansu sił
+        deck.append("*NODE PRINT, NSET=NSET_NSET_SUPPORT, TOTAL=YES")
+        deck.append("RF")
+        # 3. Naprężenia i Przemieszczenia pola (do wizualizacji)
+        deck.append("*EL PRINT, ELSET=NALL") # Opcjonalnie ograniczyć do powłok
         deck.append("S")
+        deck.append("*NODE PRINT, NSET=NALL") # Drukuj wszystko do .dat (może być dużo)
+        deck.append("U")
         
         deck.append("*END STEP")
 
-        # --- 7. KROK 2: WYBOCZENIE (*BUCKLE) ---
+        # --- 7. STEP 2: WYBOCZENIE ---
+        deck.append("** --- KROK 2: WYBOCZENIE ---")
         deck.append("*STEP")
         deck.append("*BUCKLE")
-        deck.append("10")
+        deck.append("10") # Liczymy 10 pierwszych modów
         
         deck.append("*CLOAD")
-        if abs(fx) > 1e-9: deck.append(f"{self.ref_node_id}, 1, {fx}")
-        if abs(fy) > 1e-9: deck.append(f"{self.ref_node_id}, 2, {fy}")
-        if abs(fz) > 1e-9: deck.append(f"{self.ref_node_id}, 3, {fz}")
-        if abs(mx) > 1e-9: deck.append(f"{self.ref_node_id}, 4, {mx}")
-        if abs(my) > 1e-9: deck.append(f"{self.ref_node_id}, 5, {my}")
-        if abs(mz) > 1e-9: deck.append(f"{self.ref_node_id}, 6, {mz}")
+        # Powtarzamy obciążenia (tzw. dead load w analizie wyboczeniowej)
+        if abs(fx)>1e-9: deck.append(f"{target}, 1, {fx}")
+        if abs(fy)>1e-9: deck.append(f"{target}, 2, {fy}")
+        if abs(fz)>1e-9: deck.append(f"{target}, 3, {fz}")
+        if abs(mx)>1e-9: deck.append(f"{target}, 4, {mx}")
+        if abs(my)>1e-9: deck.append(f"{target}, 5, {my}")
+        if abs(mz)>1e-9: deck.append(f"{target}, 6, {mz}")
         
+        # Zapis do pliku binarnego .frd (dla wizualizacji modów wyboczenia)
         deck.append("*NODE FILE")
         deck.append("U")
         deck.append("*END STEP")
 
-        # Zapis gotowego pliku .inp
+        # Zapis pliku
         timestamp = int(time.time())
         run_inp_path = inp_path.replace(".inp", f"_run_{timestamp}.inp")
         
-        with open(run_inp_path, 'w') as f:
-            f.write("\n".join(deck))
-            
-        return run_inp_path
+        try:
+            with open(run_inp_path, 'w') as f:
+                f.write("\n".join(deck))
+            return run_inp_path
+        except Exception as e:
+            print(f"[FEM-SHELL] Error writing .inp file: {e}")
+            return None
 
     def run_solver(self, inp_path, work_dir, num_threads=4, callback=None):
         """Uruchamia CalculiX (ccx)."""
@@ -246,15 +289,19 @@ class FemEngineShell:
              if os.path.exists(local): ccx_cmd = local
              
         job_name = os.path.splitext(os.path.basename(inp_path))[0]
+        
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = str(num_threads)
         
         try:
             cmd = [ccx_cmd, job_name]
+            # Uruchomienie procesu
             process = subprocess.Popen(
                 cmd, cwd=work_dir, shell=(os.name=='nt'), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
             )
+            
+            # Logowanie wyjścia
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
@@ -263,103 +310,119 @@ class FemEngineShell:
                     l = line.strip()
                     if l and callback:
                         callback(f"CCX: {l}")
+            
             return (process.poll() == 0)
         except Exception as e:
             if callback: callback(f"ERROR executing solver: {e}")
             return False
 
     def parse_dat_results(self, dat_path):
-        """Parsuje plik tekstowy .dat z wynikami."""
+        """
+        Parsuje plik tekstowy .dat z wynikami.
+        Wyciąga: Max VM, Przemieszczenia Węzła Strukturalnego, Reakcje, Wyboczenie.
+        """
         if not os.path.exists(dat_path):
             return {}
 
         results = {
             "MODEL_MAX_VM": 0.0,
             "BUCKLING_FACTORS": [],
-            "REACTIONS": {"Fx":0, "Fy":0, "Fz":0, "Mx":0, "My":0, "Mz":0},
             "DISPLACEMENTS_REF": {"Ux":0.0, "Uy":0.0, "Uz":0.0},
+            "REACTIONS_TOTAL": {"Fx":0.0, "Fy":0.0, "Fz":0.0},
             "converged": False
         }
         
         current_step = 0
-        reading_reactions = False
-        reading_stresses = False
-        current_type = None # disp, stress, force
-        
+        current_type = None # 'disp', 'stress', 'reaction_total'
         max_vm = 0.0
         
-        with open(dat_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                l_lower = line.lower()
+        try:
+            with open(dat_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    l_lower = line.lower() # ZMIANA: używamy l_lower
 
-                # Wykrywanie kroku
-                if "step" in l_lower and "1" in l_lower and "static" in l_lower:
-                    current_step = 1
-                elif "step" in l_lower and "buckle" in l_lower:
-                    current_step = 2
-
-                # --- STEP 1: STATYKA ---
-                if current_step == 1:
+                    # Wykrywanie kroku
+                    if "step" in l_lower and "1" in l_lower and "static" in l_lower: 
+                        current_step = 1
+                    elif "step" in l_lower and "buckle" in l_lower: 
+                        current_step = 2
                     
-                    # 1. Wykrywanie typu danych (Displacements, Stresses, Forces)
-                    if "displacements" in l_lower:
-                        current_type = 'disp'
-                        continue
-                    if "stresses" in l_lower:
-                        current_type = 'stress'
-                        continue
-                    if "forces" in l_lower:
-                        current_type = 'force'
-                        continue
-
-                    # Parsowanie linii z danymi
-                    parts = line.split()
-                    if not parts or not parts[0].isdigit():
-                        continue
-                        
-                    nid = int(parts[0])
-                    
-                    # A. Przemieszczenia (szukamy Ref Node)
-                    if current_type == 'disp':
-                        if self.ref_node_id and nid == self.ref_node_id:
-                            # Format: Node, Ux, Uy, Uz
-                            try:
-                                results["DISPLACEMENTS_REF"]["Ux"] = float(parts[1])
-                                results["DISPLACEMENTS_REF"]["Uy"] = float(parts[2])
-                                results["DISPLACEMENTS_REF"]["Uz"] = float(parts[3])
-                            except: pass
-
-                    # B. Naprężenia (Max VM globalnie)
-                    elif current_type == 'stress':
-                        try:
-                            # Format Shell: Elem_ID, Int_Pt, S11, S22, S33, S12, S13, S23
-                            if len(parts) >= 8:
-                                s11 = float(parts[2])
-                                s22 = float(parts[3])
-                                s33 = float(parts[4])
-                                s12 = float(parts[5])
-                                s13 = float(parts[6])
-                                s23 = float(parts[7])
-                                
-                                vm = math.sqrt(0.5 * ((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
-                                if vm > max_vm: max_vm = vm
-                        except: pass
-                        
-                    # C. Reakcje
-                    # (Można dodać parsowanie sumaryczne, jeśli CalculiX wyrzuca linię TOTAL)
-
-                # --- STEP 2: WYBOCZENIE ---
-                if current_step == 2:
-                    if "buckling factor" in l_lower:
+                    # --- STEP 2: WYBOCZENIE ---
+                    if current_step == 2 and "buckling factor" in l_lower:
                         parts = line.split()
                         try:
                             val = float(parts[-1])
                             results["BUCKLING_FACTORS"].append(val)
                         except: pass
+                        continue
+                    
+                    # --- STEP 1: STATYKA ---
+                    if current_step == 1:
+                        # 1. Nagłówki sekcji
+                        if "displacements" in l_lower:
+                            current_type = 'disp'
+                            continue
+                        if "stresses" in l_lower:
+                            current_type = 'stress'
+                            continue
+                        # Wykrywanie sekcji TOTAL FORCES (Reakcje)
+                        if "total" in l_lower and "force" in l_lower and "support" in l_lower:
+                            current_type = 'reaction_total'
+                            continue
+                        if "forces" in l_lower and "total" not in l_lower: # Zwykłe siły węzłowe
+                            current_type = None
+                            continue
+
+                        # 2. Parsowanie danych
+                        parts = line.split()
+                        if not parts: continue
+
+                        # A. Reakcje Sumaryczne (specyficzny format CalculiX pod nagłówkiem)
+                        # Zazwyczaj CCX wypisuje linię z liczbami zaraz po nagłówku TOTAL
+                        if current_type == 'reaction_total':
+                            try:
+                                # Szukamy linii z 3 lub więcej floatami
+                                vals = [float(x) for x in parts if x.replace('.','',1).replace('e','',1).replace('-','',1).isdigit()]
+                                if len(vals) >= 3:
+                                    # Zakładamy kolejność Fx, Fy, Fz
+                                    results["REACTIONS_TOTAL"]["Fx"] = vals[0]
+                                    results["REACTIONS_TOTAL"]["Fy"] = vals[1]
+                                    results["REACTIONS_TOTAL"]["Fz"] = vals[2]
+                                    current_type = None # Odczytano, reset
+                            except: pass
+                            continue
+
+                        # Jeśli nie liczba na początku, to nagłówek lub śmieć
+                        if not parts[0].isdigit(): 
+                            continue
+                        
+                        nid = int(parts[0])
+                        try: vals = [float(x) for x in parts[1:]]
+                        except: continue
+
+                        # B. Przemieszczenia (tylko dla Ref Node Struct)
+                        if current_type == 'disp':
+                            if self.ref_node_structure and nid == self.ref_node_structure:
+                                if len(vals) >= 3:
+                                    results["DISPLACEMENTS_REF"] = {"Ux":vals[0], "Uy":vals[1], "Uz":vals[2]}
+                        
+                        # C. Naprężenia (Szukanie Globalnego Max VM)
+                        elif current_type == 'stress':
+                            # Format Shell S w .dat: ID, IntPt, S11, S22, S33, S12, S13, S23
+                            # Czasami CCX wypisuje średnie w węzłach.
+                            if len(vals) >= 8: # Tensor pełny
+                                # Wzór Von Misesa
+                                s11, s22, s33 = vals[2], vals[3], vals[4]
+                                s12, s13, s23 = vals[5], vals[6], vals[7]
+                                vm = math.sqrt(0.5*((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
+                                if vm > max_vm: max_vm = vm
+
+        except Exception as e:
+            print(f"[FEM-SHELL] Error parsing .dat: {e}")
 
         results["MODEL_MAX_VM"] = max_vm
-        results["converged"] = (max_vm > 0.0)
+        results["converged"] = (max_vm > 0.0) # Proste kryterium zbieżności
         
         return results

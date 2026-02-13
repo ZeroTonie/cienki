@@ -127,9 +127,7 @@ class FemEngine:
     def prepare_calculix_deck(self, inp_path, run_params):
         if not os.path.exists(inp_path): return None
         
-        # Reset mapy dla każdego nowego uruchomienia
         self.node_to_elements = {}
-
         work_dir = os.path.dirname(inp_path)
         base = os.path.splitext(os.path.basename(inp_path))[0]
         
@@ -150,7 +148,7 @@ class FemEngine:
         
         with open(inp_path, 'r') as f: mesh_content = f.read()
 
-        # --- Budowanie mapy Węzeł -> Elementy ---
+        # Budowanie mapy Węzeł -> Elementy
         lines = mesh_content.splitlines()
         element_block_lines = []
         in_element_block = False
@@ -182,7 +180,7 @@ class FemEngine:
             elif 'C3D4' in element_type_line: nodes_per_element = 4
             
             if nodes_per_element > 0 and all_numbers:
-                numbers_per_entry = nodes_per_element + 1 # ID + nodes
+                numbers_per_entry = nodes_per_element + 1 
                 for i in range(0, len(all_numbers), numbers_per_entry):
                     chunk = all_numbers[i : i + numbers_per_entry]
                     if len(chunk) == numbers_per_entry:
@@ -215,7 +213,6 @@ class FemEngine:
         for i in range(0, len(all_ids), 12):
             deck.append(", ".join(map(str, all_ids[i:i+12])))
 
-        # --- SEKCJA LOAD REF NODE ---
         L = float(run_params.get("Length", 1000.0))
         y_load_point = float(run_params.get("Y_ref_node", 0.0))
         
@@ -233,12 +230,12 @@ class FemEngine:
         deck.append(f"*MATERIAL, NAME=STEEL\n*ELASTIC\n{E}, {nu}")
         deck.append("*SOLID SECTION, ELSET=VOL_ALL, MATERIAL=STEEL")
         
-        # --- KROK 1: STATYKA ---
+        # KROK 1: STATYKA
         deck.append("*STEP")
         
         solver_type = run_params.get("solver_type", "DIRECT")
         if solver_type == "ITERATIVE":
-            deck.append("*STATIC, SOLVER=ITERATIVE, CHI=1e-8")
+            deck.append("*STATIC, SOLVER=ITERATIVE SCALING, CHI=1e-8")
         else:
             deck.append("*STATIC")
         
@@ -261,8 +258,6 @@ class FemEngine:
         if abs(my) > 1e-9: deck.append(f"{self.load_ref_node}, 5, {my}")
         if abs(mz) > 1e-9: deck.append(f"{self.load_ref_node}, 6, {mz}")
         
-        # Żądanie outputu reakcji dla NSET_SURF_SUPPORT
-        # To spowoduje, że CCX wypisze "total force ... for set NSET_SURF_SUPPORT" w .dat
         if self.support_nodes:
             deck.append("*NODE PRINT, NSET=NSET_SURF_SUPPORT")
             deck.append("RF")
@@ -280,7 +275,7 @@ class FemEngine:
         
         deck.append("*END STEP")
         
-        # --- KROK 2: WYBOCZENIE ---
+        # KROK 2: WYBOCZENIE
         deck.append("*STEP")
         deck.append("*BUCKLE")
         deck.append("3")
@@ -329,6 +324,105 @@ class FemEngine:
             if callback: callback(f"ERROR: {e}")
             return False
 
+    # -------------------------------------------------------------------------
+    # NOWE METODY POMOCNICZE (STANDALONE)
+    # -------------------------------------------------------------------------
+
+    def _get_reactions_robust(self, dat_path):
+        """Niezależny parser reakcji podporowych - odporny na błędy w reszcie pliku."""
+        total_rf = [0.0, 0.0, 0.0]
+        total_rm = [0.0, 0.0, 0.0]
+        
+        if not os.path.exists(dat_path): return total_rf, total_rm
+        
+        node_forces = {}
+        in_block = False
+        
+        try:
+            with open(dat_path, 'r') as f:
+                for line in f:
+                    l_low = line.lower().strip()
+                    
+                    # Szukamy początku bloku reakcji
+                    if "forces" in l_low and "rf" in l_low and "support" in l_low:
+                        in_block = True
+                        continue
+                    
+                    if in_block:
+                        # 1. Sprawdź, czy CalculiX podał sumę "total force"
+                        if "total force" in l_low:
+                            parts = line.split(":")[-1].split()
+                            # Szukamy 3 ostatnich liczb (Fx, Fy, Fz)
+                            nums = []
+                            for p in parts:
+                                try: nums.append(float(p))
+                                except: pass
+                            if len(nums) >= 3:
+                                total_rf = nums[-3:]
+                            # Po total force blok się kończy
+                            break 
+                        
+                        # 2. Zabezpieczenie przed wyjściem z bloku (nowy nagłówek)
+                        if "stresses" in l_low or "displacements" in l_low or "buckling" in l_low:
+                            break
+                        
+                        # 3. Parsowanie wierszy węzłów
+                        parts = line.split()
+                        if not parts: continue
+                        if parts[0].isdigit():
+                            try:
+                                nid = int(parts[0])
+                                f_vec = [float(parts[1]), float(parts[2]), float(parts[3])]
+                                node_forces[nid] = f_vec
+                            except: pass
+        except: pass
+
+        # Jeśli nie znaleziono linii "total force", sumujemy ręcznie z węzłów
+        if total_rf == [0.0, 0.0, 0.0] and node_forces:
+            sum_f = [0.0, 0.0, 0.0]
+            for f_vec in node_forces.values():
+                sum_f[0] += f_vec[0]
+                sum_f[1] += f_vec[1]
+                sum_f[2] += f_vec[2]
+            total_rf = sum_f
+
+        # Obliczenie Momentów (M = r x F) względem (0,0,0)
+        if self.mapper and self.mapper.loaded and node_forces:
+            sum_m = [0.0, 0.0, 0.0]
+            for nid, f_vec in node_forces.items():
+                if nid in self.mapper.node_map_dict:
+                    x, y, z = self.mapper.node_map_dict[nid]
+                    fx, fy, fz = f_vec
+                    # Iloczyn wektorowy
+                    sum_m[0] += (y * fz - z * fy)
+                    sum_m[1] += (z * fx - x * fz)
+                    sum_m[2] += (x * fy - y * fx)
+            total_rm = sum_m
+            
+        return total_rf, total_rm
+
+    def _get_buckling_robust(self, dat_path):
+        """Niezależny parser szukający mnożników wyboczenia w całym pliku."""
+        factors = []
+        if not os.path.exists(dat_path): return factors
+        
+        try:
+            with open(dat_path, 'r') as f:
+                for line in f:
+                    if "buckling factor" in line.lower():
+                        parts = line.strip().split()
+                        try:
+                            # Szukamy ostatniej liczby w linii
+                            val = float(parts[-1])
+                            factors.append(val)
+                        except: pass
+        except: pass
+        return factors
+
+    # -------------------------------------------------------------------------
+    # GŁÓWNY PARSER (STARY - ZOSTAWIAMY LOGIKĘ DISP/STRESS, NADPISUJEMY RESZTĘ)
+    # -------------------------------------------------------------------------
+
     def parse_dat_results(self, dat_path):
         if not os.path.exists(dat_path): return {}
         
@@ -337,11 +431,9 @@ class FemEngine:
         data_force = {}  
         buckling_factors = []
 
-        # Nowe zmienne do parsowania sumarycznych reakcji
-        solver_total_rf = None
-        capturing_total_rf = False
+        # Stare zmienne (zostawiamy dla kompatybilności pętli)
+        capturing_reactions = False
         current_step = 0
-
         current_type = None
         disp_parsed_header = False
         stress_parsed_header = False
@@ -352,37 +444,36 @@ class FemEngine:
                 if not line: continue
                 l_low = line.lower()
 
-                # Wykrywanie kroku (interesuje nas Step 1 dla statyki)
+                # --- ORYGINALNA PĘTLA (DLA STRESS I DISP) ---
                 if "step" in l_low and "1" in l_low and not "end" in l_low:
                     current_step = 1
                 elif "step" in l_low and "2" in l_low:
                     current_step = 2
 
-                # Parsowanie Buckling Factor (Krok 2)
                 if current_step == 2 and "buckling factor" in l_low:
                     parts = line.split()
                     try: buckling_factors.append(float(parts[-1]))
                     except: pass
                     continue
                 
-                # --- [FIX] Parsowanie TOTAL FORCE z CalculiX (Najdokładniejsza metoda) ---
-                if current_step == 1:
-                    # Szukamy nagłówka "total force ... for set NSET_SURF_SUPPORT"
-                    if "total force" in l_low and "nset_surf_support" in l_low:
-                        capturing_total_rf = True
-                        continue # Przejdź do następnej linii, gdzie są liczby
-                    
-                    if capturing_total_rf:
-                        parts = line.split()
-                        # Oczekujemy 3 liczb: fx, fy, fz
-                        if len(parts) >= 3:
-                            try:
-                                # Nadpisujemy jeśli znaleziono
-                                solver_total_rf = [float(parts[0]), float(parts[1]), float(parts[2])]
-                            except: pass
-                        capturing_total_rf = False # Jednorazowy odczyt
+                if "forces (rf) applied to nodes of set nset_surf_support" in l_low:
+                    capturing_reactions = True
+                    current_type = None
+                    continue
+
+                if capturing_reactions:
+                    if "internal node number" in l_low: continue
+                    parts = line.split()
+                    if not parts or not parts[0].isdigit():
+                        capturing_reactions = False
+                    else:
+                        try:
+                            nid = int(parts[0])
+                            vals = [float(x) for x in parts[1:]]
+                            data_force[nid] = vals
+                        except ValueError:
+                            capturing_reactions = False
                         continue
-                # -------------------------------------------------------------------------
 
                 if "displacements" in l_low:
                     if not disp_parsed_header:
@@ -398,13 +489,10 @@ class FemEngine:
                     else:
                         current_type = None 
                     continue
-                if "forces" in l_low:
-                    current_type = 'force'
-                    continue
 
                 parts = line.split()
                 if not parts or not parts[0].isdigit():
-                    if current_type in ['disp', 'stress', 'force']:
+                    if current_type in ['disp', 'stress']:
                         current_type = None
                     continue
                 
@@ -421,64 +509,39 @@ class FemEngine:
                         vm = math.sqrt(0.5 * ((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
                         s_comps.append(vm)
                         raw_elem_stress[nid] = s_comps
-                elif current_type == 'force': data_force[nid] = vals
 
-        # --- UŚREDNIANIE WĘZŁOWE (NODAL AVERAGING) ---
+        # --- UŚREDNIANIE WĘZŁOWE (BEZ ZMIAN) ---
         data_stress = {}
         if self.node_to_elements and self.mapper and self.mapper.loaded:
             all_node_ids = self.mapper.ids if HAS_NUMPY else list(self.mapper.node_map_dict.keys())
             for node_id in all_node_ids:
                 connected_elements = self.node_to_elements.get(node_id, [])
-                
                 if not connected_elements:
-                    data_stress[node_id] = [0.0] * 7 # S11..S13, VM
+                    data_stress[node_id] = [0.0] * 7
                     continue
-                
                 stress_tensors = [raw_elem_stress[elem_id][:6] for elem_id in connected_elements if elem_id in raw_elem_stress]
-
                 if not stress_tensors:
                     data_stress[node_id] = [0.0] * 7
                     continue
-                
-                # Uśrednianie tensorów
                 if HAS_NUMPY:
                     avg_tensor = np.mean(np.array(stress_tensors), axis=0).tolist()
                 else:
                     num_tensors = len(stress_tensors)
                     avg_tensor = [sum(col) / num_tensors for col in zip(*stress_tensors)]
-                
-                # Przeliczenie Von Mises z uśrednionego tensora
                 s11, s22, s33, s12, s23, s13 = avg_tensor
                 avg_vm = math.sqrt(0.5 * ((s11-s22)**2 + (s22-s33)**2 + (s33-s11)**2 + 6*(s12**2 + s23**2 + s13**2)))
-                
                 data_stress[node_id] = avg_tensor + [avg_vm]
 
-        # --- OBLICZENIA WYNIKOWE ---
-        
-        # Priorytet: Użyj Total Force z Solvera, jeśli znaleziono
-        if solver_total_rf:
-            total_rf = solver_total_rf
-        else:
-            # Fallback: Ręczne sumowanie (podatne na błędy doboru węzłów)
-            total_rf = [0.0, 0.0, 0.0]
-            support_ids = set(self.support_nodes)
-            for nid, rf in data_force.items():
-                if nid in support_ids:
-                    total_rf[0] += rf[0]
-                    total_rf[1] += rf[1]
-                    total_rf[2] += rf[2]
-                
+        # --- OBLICZENIA POMOCNICZE (BEZ ZMIAN) ---
         phi_deg = 0.0
         if self.load_nodes and data_disp:
             min_z, max_z = 1e9, -1e9
             n_min, n_max = None, None
-            
             for nid in self.load_nodes:
                 if nid in self.mapper.node_map_dict:
                     z = self.mapper.node_map_dict[nid][2]
                     if z < min_z: min_z = z; n_min = nid
                     if z > max_z: max_z = z; n_max = nid
-            
             if n_min and n_max and (max_z - min_z) > 1.0:
                 uy_1 = data_disp.get(n_min, [0,0,0])[1]
                 uy_2 = data_disp.get(n_max, [0,0,0])[1]
@@ -498,7 +561,6 @@ class FemEngine:
                 s = data_stress.get(nid, [0.0]*7)
                 u_mag = math.sqrt(d[0]**2 + d[1]**2 + d[2]**2)
                 if u_mag > max_u: max_u = u_mag
-                
                 full_res[nid] = [coords[0], coords[1], coords[2], s[-1] if len(s)>6 else 0.0, u_mag, d[1], d[2]]
 
         int_data = []
@@ -522,11 +584,23 @@ class FemEngine:
                 "X": meta['orig_x'], "U_X":d[0], "U_Y":d[1], "U_Z":d[2], "S_VM": s[-1] if len(s)>6 else 0.0
             }
 
+        # --- NOWOŚĆ: NADPISANIE WRAŻLIWYCH DANYCH NOWYMI PARSERAMI ---
+        # Uruchamiamy "szperacze"
+        robust_rf, robust_rm = self._get_reactions_robust(dat_path)
+        robust_buckling = self._get_buckling_robust(dat_path)
+
         return {
             "MODEL_MAX_VM": max_vm,
             "MODEL_MAX_U": max_u,
-            "BUCKLING_FACTORS": buckling_factors,
-            "REACTIONS": {"Fx": total_rf[0], "Fy": total_rf[1], "Fz": total_rf[2]},
+            "BUCKLING_FACTORS": robust_buckling, # Używamy wyniku z nowego parsera
+            "REACTIONS": {
+                "Fx": robust_rf[0], 
+                "Fy": robust_rf[1], 
+                "Fz": robust_rf[2],
+                "Mx": robust_rm[0],
+                "My": robust_rm[1],
+                "Mz": robust_rm[2]
+            },
             "ROTATIONS": {"Rx": math.radians(phi_deg)},
             "INTERFACE_DATA": int_data,
             "INTERFACE_MAX_SHEAR": max_tau,

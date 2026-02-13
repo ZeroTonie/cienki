@@ -49,6 +49,8 @@ import material_catalogue
 import engine_solver
 import fem_optimizer
 import data_aggregator  # Krytyczny moduł - musi być tu
+from fem_optimizer_shell import FemOptimizerShell
+from data_aggregator_shell import DataAggregatorShell
 
 # --- 6. IMPORTY OPCJONALNE (WIZUALIZACJA 3D / WYKRESY) ---
 # PyVista (3D)
@@ -1004,6 +1006,7 @@ class Tab2_Knowledge(QWidget):
 
 class Tab3_Selector(QWidget):
     request_transfer = pyqtSignal(list)
+    request_transfer_shell = pyqtSignal(list)
     def __init__(self):
         super().__init__()
         self.init_ui()
@@ -1012,14 +1015,16 @@ class Tab3_Selector(QWidget):
         l = QVBoxLayout(self)
         tb = QHBoxLayout()
         b_load = QPushButton("📂 Wczytaj CSV"); b_load.clicked.connect(lambda: self.load_csv())
-        self.chk_sci = QCheckBox("E-notacja"); self.chk_sci.stateChanged.connect(self.tog_sci)
+        self.chk_sci = QCheckBox("E-notacja"); self.chk_sci.toggled.connect(self.tog_sci)
         b_col = QPushButton("🎨 Kolor"); b_col.clicked.connect(self.col)
-        self.b_send = QPushButton("PRZEKAŻ DO FEM ➡️"); self.b_send.setEnabled(False); self.b_send.clicked.connect(self.send); self.b_send.setStyleSheet("background-color:#2da342;font-weight:bold;")
-        tb.addWidget(b_load); tb.addWidget(self.chk_sci); tb.addWidget(b_col); tb.addStretch(); tb.addWidget(self.b_send); l.addLayout(tb)
+        self.b_send_solid = QPushButton("PRZEKAŻ DO SOLID ➡️"); self.b_send_solid.setEnabled(False); self.b_send_solid.clicked.connect(self.send_solid); self.b_send_solid.setStyleSheet("background-color:#2da342;font-weight:bold;")
+        self.b_send_shell = QPushButton("PRZEKAŻ DO SHELL ➡️"); self.b_send_shell.setEnabled(False); self.b_send_shell.clicked.connect(self.send_shell); self.b_send_shell.setStyleSheet("background-color:#3498db;font-weight:bold;")
+
+        tb.addWidget(b_load); tb.addWidget(self.chk_sci); tb.addWidget(b_col); tb.addStretch(); tb.addWidget(self.b_send_solid); tb.addWidget(self.b_send_shell); l.addLayout(tb)
         
         spl = QSplitter(); l.addWidget(spl)
         
-        ff = QFrame(); fl = QVBoxLayout(ff)
+        ff = QFrame(); ff.setFixedWidth(200); fl = QVBoxLayout(ff)
         sc = QScrollArea(); sc.setWidgetResizable(True); self.w_fil = QWidget(); self.l_fil = QVBoxLayout(self.w_fil); self.l_fil.setAlignment(Qt.AlignmentFlag.AlignTop); sc.setWidget(self.w_fil); fl.addWidget(sc)
         b_af = QPushButton("+ Filtr"); b_af.clicked.connect(self.add_fil); fl.addWidget(b_af)
         b_ap = QPushButton("Zastosuj"); b_ap.clicked.connect(self.apply); fl.addWidget(b_ap)
@@ -1035,7 +1040,10 @@ class Tab3_Selector(QWidget):
         
         self.tab = QTableView(); self.head = CustomHeaderView(self.tab); self.tab.setHorizontalHeader(self.head); spl.addWidget(self.tab)
         self.det = QTextBrowser(); self.det.setStyleSheet("font-family:Consolas;"); spl.addWidget(self.det)
-        spl.setSizes([200, 900, 300])
+        spl.setStretchFactor(0, 0)
+        spl.setStretchFactor(1, 1)
+        spl.setSizes([200, 1200])
+
 
     def load_csv(self, path=None):
         if not path: path, _ = QFileDialog.getOpenFileName(self, "CSV", "", "*.csv")
@@ -1048,7 +1056,8 @@ class Tab3_Selector(QWidget):
                 self.model = AdvancedPandasModel(df[cols])
                 self.tab.setModel(self.model); self.avail = list(df.columns)
                 self.tab.selectionModel().currentChanged.connect(self.click)
-                self.b_send.setEnabled(True)
+                self.b_send_solid.setEnabled(True)
+                self.b_send_shell.setEnabled(True)
             except Exception as e: QMessageBox.critical(self, "Err", str(e))
 
     def click(self, c, p):
@@ -1094,15 +1103,24 @@ class Tab3_Selector(QWidget):
         html += "</table>"
         self.det.setHtml(html)
 
-    def send(self):
+    def send_solid(self):
         if not hasattr(self, 'model'): return
         sel = self.model._df[self.model._df["PRZEKAZ"]==True].to_dict('records')
         if not sel: QMessageBox.warning(self,"Info","Zaznacz profile (PRZEKAZ)."); return
         self.request_transfer.emit(sel)
-        QMessageBox.information(self, "OK", f"Przekazano {len(sel)} profili.")
+        QMessageBox.information(self, "OK", f"Przekazano {len(sel)} profili do analizy SOLID.")
+
+    def send_shell(self):
+        if not hasattr(self, 'model'): return
+        sel = self.model._df[self.model._df["PRZEKAZ"]==True].to_dict('records')
+        if not sel: QMessageBox.warning(self,"Info","Zaznacz profile (PRZEKAZ)."); return
+        # Nowy sygnał dla Shell
+        if hasattr(self, 'request_transfer_shell'):
+            self.request_transfer_shell.emit(sel)
+            QMessageBox.information(self, "OK", f"Przekazano {len(sel)} profili do analizy SHELL.")
 
     def tog_sci(self, s): 
-        if hasattr(self, 'model'): self.model.set_scientific_notation(s==2)
+        if hasattr(self, 'model'): self.model.set_scientific_notation(s)
     def col(self): 
         c = QColorDialog.getColor()
         if c.isValid(): self.model.colors["bg_highlight"]=c; self.model.layoutChanged.emit()
@@ -1926,8 +1944,379 @@ class Tab4_Fem(QWidget):
 class MplCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
+        # Ciemny motyw dla wykresów
+        self.fig.patch.set_facecolor('#2b2b2b')
         self.axes = self.fig.add_subplot(111)
+        self.axes.set_facecolor('#2b2b2b')
+        self.axes.tick_params(colors='white')
+        self.axes.xaxis.label.set_color('white')
+        self.axes.yaxis.label.set_color('white')
+        self.axes.title.set_color('white')
+        for spine in self.axes.spines.values():
+            spine.set_edgecolor('white')
         super().__init__(self.fig)
+
+class GeometryPreviewWorker(QThread):
+    finished_signal = pyqtSignal(str) # Zwraca ścieżkę do pliku .msh
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, geo_engine, params):
+        super().__init__()
+        self.geo_engine = geo_engine
+        self.params = params
+
+    def run(self):
+        self.log_signal.emit("Generowanie podglądu geometrii...")
+        res = self.geo_engine.generate_model(self.params)
+        if res and "paths" in res and "msh" in res["paths"]:
+            self.finished_signal.emit(res["paths"]["msh"])
+            self.log_signal.emit("Geometria gotowa do podglądu.")
+        else:
+            self.finished_signal.emit("")
+            self.log_signal.emit("Błąd generowania geometrii podglądu.")
+
+class ShellWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool)
+    progress_signal = pyqtSignal(int)
+
+    def __init__(self, optimizer_shell, candidates, load_conditions, mesh_settings):
+        super().__init__()
+        self.optimizer = optimizer_shell
+        self.candidates = candidates
+        self.loads = load_conditions
+        self.mesh = mesh_settings
+        self.stop_requested = False
+
+    def request_stop(self):
+        self.stop_requested = True
+
+    def run(self):
+        self.log_signal.emit(">>> START PROCEDURY SHELL BATCH...")
+        total = len(self.candidates)
+        for i, cand in enumerate(self.candidates):
+            if self.stop_requested:
+                self.log_signal.emit("...Przerwano na żądanie.")
+                break
+            
+            self.progress_signal.emit(i)
+            
+            try:
+                # run_batch z optimizer_shell oczekuje listy, więc opakowujemy pojedynczego kandydata
+                self.optimizer.run_batch([cand], self.loads, self.mesh)
+            except Exception as e:
+                self.log_signal.emit(f"BŁĄD podczas przetwarzania {cand.get('Name', 'N/A')}: {e}")
+                self.log_signal.emit(traceback.format_exc())
+
+        self.progress_signal.emit(total)
+        self.log_signal.emit(">>> ZAKOŃCZONO BATCH SHELL.")
+        self.finished_signal.emit(True)
+
+class Tab6_Shell_Settings(QWidget):
+    analysis_finished = pyqtSignal()
+
+    def __init__(self, optimizer_shell, parent=None):
+        super().__init__(parent)
+        self.candidates = []
+        self.optimizer = optimizer_shell
+        self.init_ui()
+
+    def init_ui(self):
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout = QHBoxLayout(self); main_layout.addWidget(splitter)
+
+        # --- LEWY PANEL: USTAWIENIA ---
+        left_panel = QWidget(); l_layout = QVBoxLayout(left_panel)
+        
+        # 1. Obciążenia
+        g_loads = QGroupBox("1. Warunki Brzegowe i Obciążenia"); f_loads = QFormLayout(g_loads)
+        self.inp_fx = QLineEdit("-24000.0"); self.chk_fx = QCheckBox("Z analityki"); self.chk_fx.setChecked(True)
+        h_fx = QHBoxLayout(); h_fx.addWidget(self.inp_fx); h_fx.addWidget(self.chk_fx); f_loads.addRow("Siła Fx [N]:", h_fx)
+        
+        self.inp_fy = QLineEdit("0.0"); self.chk_fy = QCheckBox("Z analityki"); self.chk_fy.setChecked(True)
+        h_fy = QHBoxLayout(); h_fy.addWidget(self.inp_fy); h_fy.addWidget(self.chk_fy); f_loads.addRow("Siła Fy [N]:", h_fy)
+
+        self.inp_fz = QLineEdit("0.0"); self.chk_fz = QCheckBox("Z analityki"); self.chk_fz.setChecked(True)
+        h_fz = QHBoxLayout(); h_fz.addWidget(self.inp_fz); h_fz.addWidget(self.chk_fz); f_loads.addRow("Siła Fz [N]:", h_fz)
+
+        # Ramię siły (Y)
+        self.inp_y_ref = QLineEdit("0.0")
+        h_y_ref_mode = QHBoxLayout()
+        self.rb_y_ref_manual = QRadioButton("Ręcznie"); self.rb_y_ref_ramie = QRadioButton("Ramię"); self.rb_y_ref_yc = QRadioButton("Śr. ciężkości")
+        self.y_ref_group = QButtonGroup(self); self.y_ref_group.addButton(self.rb_y_ref_manual, 0); self.y_ref_group.addButton(self.rb_y_ref_ramie, 1); self.y_ref_group.addButton(self.rb_y_ref_yc, 2)
+        h_y_ref_mode.addWidget(self.rb_y_ref_manual); h_y_ref_mode.addWidget(self.rb_y_ref_ramie); h_y_ref_mode.addWidget(self.rb_y_ref_yc)
+        f_loads.addRow("Położenie Y siły:", h_y_ref_mode)
+        f_loads.addRow("Wartość Y [mm]:", self.inp_y_ref)
+        self.rb_y_ref_ramie.setChecked(True)
+
+        self.inp_mx = QLineEdit("0.0"); f_loads.addRow("Moment Mx [Nmm]:", self.inp_mx)
+        self.inp_my = QLineEdit("0.0"); f_loads.addRow("Moment My [Nmm]:", self.inp_my)
+        self.inp_mz = QLineEdit("0.0"); f_loads.addRow("Moment Mz [Nmm]:", self.inp_mz)
+        l_layout.addWidget(g_loads)
+
+        # 2. Siatka
+        g_mesh = QGroupBox("2. Parametry Dyskretyzacji"); f_mesh = QFormLayout(g_mesh)
+        self.sp_mesh_size = QDoubleSpinBox(); self.sp_mesh_size.setRange(1.0, 100.0); self.sp_mesh_size.setValue(20.0)
+        self.sp_iter = QSpinBox(); self.sp_iter.setRange(1, 10); self.sp_iter.setValue(5)
+        self.sp_conv_tol = QDoubleSpinBox(); self.sp_conv_tol.setRange(0.1, 10.0); self.sp_conv_tol.setValue(2.0); self.sp_conv_tol.setSuffix(" %")
+        self.sp_ref_factor = QDoubleSpinBox(); self.sp_ref_factor.setRange(0.1, 0.95); self.sp_ref_factor.setValue(0.7); self.sp_ref_factor.setSingleStep(0.05)
+        self.combo_order = QComboBox(); self.combo_order.addItems(["1 (Liniowe)", "2 (Kwadratowe)"]); self.combo_order.setCurrentIndex(1)
+        f_mesh.addRow("Startowy rozmiar siatki [mm]:", self.sp_mesh_size)
+        f_mesh.addRow("Max iteracji:", self.sp_iter)
+        f_mesh.addRow("Warunek zbieżności:", self.sp_conv_tol)
+        f_mesh.addRow("Wsp. zagęszczenia:", self.sp_ref_factor)
+        f_mesh.addRow("Rząd elementów:", self.combo_order)
+        l_layout.addWidget(g_mesh)
+
+        # 3. Sterowanie
+        g_ctrl = QGroupBox("3. Sterowanie"); l_ctrl = QVBoxLayout(g_ctrl)
+        self.list_cands = QListWidget(); self.list_cands.setFixedHeight(80); l_ctrl.addWidget(QLabel("Kandydaci do analizy:")); l_ctrl.addWidget(self.list_cands)
+        self.btn_run = QPushButton("URUCHOM OBLICZENIA SHELL"); self.btn_run.setStyleSheet("background-color:#27ae60; font-weight:bold; padding:8px;")
+        self.console = QTextBrowser(); self.console.setStyleSheet("font-family:Consolas; font-size:10px; background:#111; color:#0f0;")
+        self.progress = QProgressBar()
+        l_ctrl.addWidget(self.btn_run); l_ctrl.addWidget(self.console); l_ctrl.addWidget(self.progress)
+        l_layout.addWidget(g_ctrl)
+        l_layout.addStretch()
+        splitter.addWidget(left_panel)
+
+        # --- PRAWY PANEL: WIZUALIZACJA ---
+        right_panel = QWidget(); r_layout = QVBoxLayout(right_panel)
+        self.view_3d_panel = QFrame()
+        if HAS_PYVISTA:
+            l_3d = QVBoxLayout(self.view_3d_panel); l_3d.setContentsMargins(0,0,0,0)
+            self.plotter = QtInteractor(self.view_3d_panel); self.plotter.set_background("#303030")
+            l_3d.addWidget(self.plotter.interactor)
+        else:
+            l_3d = QVBoxLayout(self.view_3d_panel); l_3d.addWidget(QLabel("Brak PyVista"))
+        
+        btn_preview = QPushButton("Pokaż/Odśwież Geometrię"); btn_preview.clicked.connect(self.preview_geometry)
+        r_layout.addWidget(btn_preview)
+        r_layout.addWidget(self.view_3d_panel)
+        splitter.addWidget(right_panel)
+
+        splitter.setSizes([400, 600])
+        
+        # Podpięcie loggera do konsoli
+        if self.optimizer:
+            self.optimizer.logger = self.console.append
+
+        # Połączenia sygnałów
+        self.btn_run.clicked.connect(self.run_analysis)
+        self.chk_fx.toggled.connect(lambda c: self.inp_fx.setDisabled(c))
+        self.chk_fy.toggled.connect(lambda c: self.inp_fy.setDisabled(c))
+        self.chk_fz.toggled.connect(lambda c: self.inp_fz.setDisabled(c))
+        self.y_ref_group.idToggled.connect(self.on_y_ref_mode_changed)
+
+    def receive_data(self, candidates):
+        self.candidates = candidates
+        self.list_cands.clear()
+        for cand in candidates:
+            name = cand.get("Nazwa_Profilu", "N/A")
+            tp = cand.get("Input_Geo_tp", 0); bp = cand.get("Input_Geo_bp", 0)
+            self.list_cands.addItem(f"{name} (tp={tp}, bp={bp})")
+        self.console.append(f"Załadowano {len(candidates)} kandydatów.")
+
+        if candidates:
+            c = candidates[0]
+            if self.chk_fx.isChecked(): self.inp_fx.setText(f"{-float(c.get('Input_Load_Fx', 0.0)):.1f}")
+            if self.chk_fy.isChecked(): self.inp_fy.setText(f"{float(c.get('Res_Force_Fy_Ed', 0.0)):.1f}")
+            if self.chk_fz.isChecked(): self.inp_fz.setText(f"{float(c.get('Res_Force_Fz_Ed', 0.0)):.1f}")
+            self.on_y_ref_mode_changed(self.y_ref_group.checkedId(), True)
+
+    def on_y_ref_mode_changed(self, btn_id, checked):
+        if not checked: return
+        is_manual = (btn_id == 0)
+        self.inp_y_ref.setDisabled(not is_manual)
+        if not is_manual and self.candidates:
+            cand = self.candidates[0]
+            if btn_id == 1: # Ramię
+                self.inp_y_ref.setText(f"{cand.get('Input_Load_F_promien', 0.0):.4f}")
+            elif btn_id == 2: # Yc
+                self.inp_y_ref.setText(f"{cand.get('Res_Geo_Yc', 0.0):.4f}")
+
+    def _translate_candidate(self, c):
+        e_mod = c.get("Input_Load_E")
+        g_mod = c.get("Input_Load_G")
+        nu = 0.3
+        if e_mod and g_mod and g_mod > 0:
+            nu = (e_mod / (2.0 * g_mod)) - 1.0
+        
+        translated = {
+            "Name": f"{c.get('Nazwa_Profilu', 'Unk')}_tp{int(c.get('Input_Geo_tp', 0))}",
+            "Geom_h_c": c.get("Input_UPE_hc"), "Geom_b_c": c.get("Input_UPE_bc"),
+            "Geom_t_w": c.get("Input_UPE_twc"), "Geom_t_f": c.get("Input_UPE_tfc"),
+            "Geom_r_c": c.get("Input_UPE_rc", 0.0), "Geom_t_p": c.get("Input_Geo_tp"),
+            "Geom_b_p": c.get("Input_Geo_bp"), "Input_Length": c.get("Input_Load_L"),
+            "Mat_Name": c.get("Stop"), "Mat_E": e_mod, "Mat_nu": nu,
+        }
+        translated.update(c) # Przekaż resztę danych dla pliku analitycznego
+        return translated
+
+    def run_analysis(self):
+        if not self.candidates:
+            QMessageBox.warning(self, "Brak danych", "Najpierw przekaż kandydatów z zakładki 'Selektor Wyników'.")
+            return
+        
+        # --- Zbieranie ustawień z GUI ---
+        load_conditions = {
+            "Fx": float(self.inp_fx.text()), "Fy": float(self.inp_fy.text()), "Fz": float(self.inp_fz.text()),
+            "Mx": float(self.inp_mx.text()), "My": float(self.inp_my.text()), "Mz": float(self.inp_mz.text()),
+            "Y_load_level": float(self.inp_y_ref.text())
+        }
+        mesh_settings = {
+            "mesh_start": self.sp_mesh_size.value(),
+            "max_iter": self.sp_iter.value(),
+            "conv_tol": self.sp_conv_tol.value() / 100.0, # % na ułamek
+            "mesh_factor": self.sp_ref_factor.value(),
+            "order": self.combo_order.currentIndex() + 1
+        }
+        
+        translated_candidates = [self._translate_candidate(c) for c in self.candidates]
+
+        self.worker = ShellWorker(self.optimizer, translated_candidates, load_conditions, mesh_settings)
+        self.worker.log_signal.connect(self.console.append)
+        self.worker.progress_signal.connect(self.progress.setValue)
+        self.worker.finished_signal.connect(self.on_analysis_finished)
+        
+        self.progress.setRange(0, len(self.candidates))
+        self.btn_run.setEnabled(False)
+        self.console.clear()
+        self.worker.start()
+
+    def on_analysis_finished(self, success):
+        self.btn_run.setEnabled(True)
+        if success:
+            self.console.append("Analiza zakończona pomyślnie.")
+            self.analysis_finished.emit()
+        else:
+            self.console.append("Analiza zakończona z błędami.")
+
+    def preview_geometry(self):
+        if not self.candidates:
+            QMessageBox.warning(self, "Brak danych", "Najpierw przekaż kandydatów z zakładki 'Selektor Wyników'.")
+            return
+        
+        cand = self.candidates[0]
+        params = self.optimizer._prepare_run_params(cand, {}, 15.0) # Obciążenia i siatka nieistotne dla geometrii
+        
+        # Używamy folderu tymczasowego dla podglądu
+        preview_dir = os.path.join(self.optimizer.work_dir, "_preview_temp")
+        params['output_dir'] = preview_dir
+        params['model_name'] = "preview"
+
+        # Uruchomienie generatora w osobnym wątku
+        self.preview_worker = GeometryPreviewWorker(self.optimizer.geo_engine, params)
+        self.preview_worker.log_signal.connect(self.console.append)
+        self.preview_worker.finished_signal.connect(self.show_preview_mesh)
+        self.preview_worker.start()
+
+    def show_preview_mesh(self, msh_path):
+        if not HAS_PYVISTA or not msh_path or not os.path.exists(msh_path):
+            self.console.append("Nie można wyświetlić podglądu.")
+            return
+            
+        self.plotter.clear()
+        try:
+            mesh = pv.read(msh_path)
+            self.plotter.add_mesh(mesh, style='surface', show_edges=True, edge_color='black', color='lightblue')
+            self.plotter.add_axes(); self.plotter.reset_camera()
+        except Exception as e:
+            self.console.append(f"Błąd ładowania podglądu siatki: {e}")
+
+class Tab7_Shell_Results(QWidget):
+    def __init__(self, router, aggregator_shell, parent=None):
+        super().__init__(parent)
+        self.router = router
+        self.aggregator = aggregator_shell
+        self.init_ui()
+
+    def init_ui(self):
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        left_panel = QWidget(); l_layout = QVBoxLayout(left_panel)
+        self.results_list = QListWidget(); self.results_list.itemClicked.connect(self.on_result_selected)
+        btn_refresh = QPushButton("🔄 Odśwież"); btn_refresh.clicked.connect(self.refresh_list)
+        l_layout.addWidget(btn_refresh); l_layout.addWidget(self.results_list)
+        
+        right_panel = QWidget(); r_layout = QVBoxLayout(right_panel)
+        self.vis_tabs = QTabWidget(); r_layout.addWidget(self.vis_tabs)
+        
+        self.plot_panel = QWidget(); self.plot_layout = QVBoxLayout(self.plot_panel)
+        self.vis_tabs.addTab(self.plot_panel, "Wykresy 2D")
+        
+        self.view_3d_panel = QFrame()
+        if HAS_PYVISTA:
+            l_3d = QVBoxLayout(self.view_3d_panel); l_3d.setContentsMargins(0,0,0,0)
+            self.plotter = QtInteractor(self.view_3d_panel); self.plotter.set_background("#303030")
+            l_3d.addWidget(self.plotter.interactor)
+        else:
+            l_3d = QVBoxLayout(self.view_3d_panel); l_3d.addWidget(QLabel("Brak PyVista"))
+        self.vis_tabs.addTab(self.view_3d_panel, "Podgląd 3D")
+
+        splitter.addWidget(left_panel); splitter.addWidget(right_panel)
+        splitter.setSizes([300, 700])
+        
+        main_layout = QHBoxLayout(self); main_layout.addWidget(splitter)
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.results_list.clear()
+        comparisons = self.aggregator.get_available_comparisons()
+        for comp in comparisons:
+            item = QListWidgetItem(comp['label'])
+            item.setData(Qt.ItemDataRole.UserRole, comp['id'])
+            self.results_list.addItem(item)
+
+    def on_result_selected(self, item):
+        comp_id = item.data(Qt.ItemDataRole.UserRole)
+        data_package = self.aggregator.load_data(comp_id)
+        if not data_package: return
+        self.update_charts(data_package)
+        self.update_3d_view(comp_id)
+
+    def update_charts(self, data_package):
+        for i in reversed(range(self.plot_layout.count())): 
+            self.plot_layout.itemAt(i).widget().setParent(None)
+            
+        plots_data = self.aggregator.prepare_plots_data(data_package)
+        
+        for key, p_info in plots_data.items():
+            canvas = MplCanvas(self)
+            ax = canvas.axes
+            
+            if p_info.get("type") == "bar":
+                ax.bar(p_info["categories"], p_info["series"][0]["y"], color=p_info["series"][0].get("color", "blue"))
+            else:
+                for s in p_info["series"]:
+                    style = s.get("style", "-")
+                    if "o" in style:
+                        ax.plot(s["x"], s["y"], marker='o', markersize=s.get("size", 5), linestyle='None', color=s.get("color"), label=s["name"])
+                    else:
+                        ax.plot(s["x"], s["y"], style, color=s.get("color"), label=s["name"])
+                ax.legend()
+            
+            ax.set_title(p_info["title"]); ax.set_xlabel(p_info["xlabel"]); ax.set_ylabel(p_info["ylabel"])
+            ax.grid(True, linestyle='--', alpha=0.3)
+            if "Ugięcie" in p_info["title"]: ax.invert_yaxis()
+            self.plot_layout.addWidget(canvas)
+
+    def update_3d_view(self, comp_id):
+        if not HAS_PYVISTA: return
+        self.plotter.clear()
+        
+        fem_dir = self.router.get_path("FINAL", "", subdir=comp_id)
+        msh_files = [f for f in os.listdir(fem_dir) if f.endswith(".msh")]
+        if msh_files:
+            try:
+                path_msh = os.path.join(fem_dir, msh_files[0])
+                mesh = pv.read(path_msh)
+                self.plotter.add_mesh(mesh, style='surface', show_edges=True, edge_color='black', color='lightblue')
+            except Exception as e:
+                self.plotter.add_text(f"Błąd ładowania siatki:\n{e}", color='red')
+        else:
+            self.plotter.add_text("Nie znaleziono pliku .msh", color='red')
+
+        self.plotter.add_axes(); self.plotter.reset_camera()
 
 # =============================================================================
 # TAB 5: PEŁNA ANALIZA WYNIKÓW (DASHBOARD)
@@ -2017,35 +2406,43 @@ class Tab5_Comparison(QWidget):
         pairs = self.aggregator.get_available_comparisons()
         self.sim_table.setRowCount(len(pairs))
         
+        # Zmieniamy nagłówek na "FEM Factor", żeby było jasne co pokazujemy
+        self.sim_table.setHorizontalHeaderItem(5, QTableWidgetItem("FEM Factor [-]"))
+
         for i, p in enumerate(pairs):
             try:
-                # Wczytujemy pliki JSON (Analityka i FEM)
-                # aggregator.load_comparison_data zwraca {"fem":..., "ana":...}
                 data = self.aggregator.load_comparison_data(p["id"])
                 if not data: continue
                 
                 ana = data["ana"]
                 fem = data["fem"]
                 
-                # Wyciągamy kluczowe parametry
+                # Podstawowe wyniki
                 mass = ana.get("Res_Masa_kg_m", 0.0)
                 vm = fem.get("MODEL_MAX_VM", 0.0)
                 u = fem.get("MODEL_MAX_U", 0.0)
-                buckling = fem.get("BUCKLING_FACTORS", [])
-                b_val = buckling[0] if buckling else "-"
                 
-                # Status zbieżności
+                # --- Wyboczenie (Odczyt surowego mnożnika) ---
+                buckling = fem.get("BUCKLING_FACTORS", [])
+                if buckling:
+                    # Bierzemy pierwszy (najniższy) mnożnik
+                    b_val = buckling[0]
+                    buckling_str = f"{b_val:.4f}"
+                else:
+                    buckling_str = "-"
+                
+                # Status
                 converged = fem.get("converged", False)
-
                 if converged == "NOT_DEFINED":
                     status_str = "BATCH"
-                    s_item = QTableWidgetItem(status_str)
-                    s_item.setBackground(QColor(100, 100, 50))
+                    col_bg = QColor(100, 100, 50)
                 else:
                     status_str = "OK" if converged else "FAIL"
-                    s_item = QTableWidgetItem(status_str)
-                    s_item.setBackground(QColor(50, 100, 50) if converged else QColor(100, 50, 50))
-                # Ustawianie komórek
+                    col_bg = QColor(50, 100, 50) if converged else QColor(100, 50, 50)
+                s_item = QTableWidgetItem(status_str)
+                s_item.setBackground(col_bg)
+
+                # Wypełnianie tabeli
                 bp = ana.get("Input_Geo_bp", 0.0)
                 tp = ana.get("Input_Geo_tp", 0.0)
                 plate_dims = f"{bp:.0f} x {tp:.0f}"
@@ -2055,13 +2452,9 @@ class Tab5_Comparison(QWidget):
                 self.sim_table.setItem(i, 2, QTableWidgetItem(f"{mass:.2f}"))
                 self.sim_table.setItem(i, 3, QTableWidgetItem(f"{vm:.2f}"))
                 self.sim_table.setItem(i, 4, QTableWidgetItem(f"{u:.2f}"))
-                
-                b_item = QTableWidgetItem(f"{b_val:.4f}" if isinstance(b_val, float) else str(b_val))
-                self.sim_table.setItem(i, 5, b_item)
-                
+                self.sim_table.setItem(i, 5, QTableWidgetItem(buckling_str)) # Tu wstawiamy factor
                 self.sim_table.setItem(i, 6, s_item)
                 
-                # Zapisujemy ID symulacji w ukrytym polu
                 self.sim_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, p["id"])
                 
             except Exception as e:
@@ -2318,6 +2711,8 @@ class MainWindow(QMainWindow):
         # Inicjalizacja routera i agregatora
         self.router = router
         self.aggregator = data_aggregator.DataAggregator(self.router)
+        self.aggregator_shell = DataAggregatorShell(self.router)
+        self.optimizer_shell = FemOptimizerShell(self.router.base_output_dir)
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -2327,17 +2722,26 @@ class MainWindow(QMainWindow):
         self.tab3 = Tab3_Selector()
         self.tab4 = Tab4_Fem()
         self.tab5 = Tab5_Comparison(self.router, self.aggregator)
+        self.tab6 = Tab6_Shell_Settings(self.optimizer_shell)
+        self.tab7 = Tab7_Shell_Results(self.router, self.aggregator_shell)
 
-        self.tabs.addTab(self.tab1, "1. Dashboard & Analityka")
+        self.tabs.addTab(self.tab1, "1. Dashboard")
         self.tabs.addTab(self.tab2, "2. Baza Wiedzy")
         self.tabs.addTab(self.tab3, "3. Selektor Wyników")
-        self.tabs.addTab(self.tab4, "4. Analiza FEM")
-        self.tabs.addTab(self.tab5, "5. Post processing")
+        self.tabs.addTab(self.tab4, "4. Analiza FEM (Solid)")
+        self.tabs.addTab(self.tab5, "5. Post-processing (Solid)")
+        self.tabs.addTab(self.tab6, "6. Analiza FEM (Shell)")
+        self.tabs.addTab(self.tab7, "7. Post-processing (Shell)")
 
         self.tab3.request_transfer.connect(self.tab4.receive_data)
         self.tab3.request_transfer.connect(lambda: self.tabs.setCurrentIndex(3))
+        self.tab3.request_transfer_shell.connect(self.tab6.receive_data)
+        self.tab3.request_transfer_shell.connect(lambda: self.tabs.setCurrentIndex(5))
+
         self.tab4.batch_finished.connect(self.on_fem_finished)
         self.tab4.profile_started.connect(self.tab5.highlight_profile)
+        
+        self.tab6.analysis_finished.connect(self.on_shell_fem_finished)
 
     def on_fem_finished(self):
         self.tabs.setCurrentIndex(4) # Przełącz na Tab 5
@@ -2347,6 +2751,14 @@ class MainWindow(QMainWindow):
         if self.statusBar():
             self.statusBar().showMessage("✅ Analiza FEM zakończona. Wyniki gotowe.", 10000)
 
+    def on_shell_fem_finished(self):
+        self.tabs.setCurrentIndex(6) # Przełącz na Tab 7
+        if hasattr(self, 'tab7'):
+            self.tab7.refresh_list()
+            
+        if self.statusBar():
+            self.statusBar().showMessage("✅ Analiza SHELL zakończona. Wyniki gotowe.", 10000)
+
     def closeEvent(self, event):
         """Przechwytuje zdarzenie zamknięcia okna, aby bezpiecznie zamknąć zasoby."""
         print("Zamykanie aplikacji, czyszczenie zasobów PyVista...")
@@ -2355,6 +2767,8 @@ class MainWindow(QMainWindow):
             self.tab4.plotter.close()
         if hasattr(self, 'tab5') and hasattr(self.tab5, 'plotter') and self.tab5.plotter:
             self.tab5.plotter.close()
+        if hasattr(self, 'tab7') and hasattr(self.tab7, 'plotter') and self.tab7.plotter:
+            self.tab7.plotter.close()
         event.accept()
 
 # ==============================================================================
