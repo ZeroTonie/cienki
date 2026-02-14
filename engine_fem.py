@@ -329,7 +329,11 @@ class FemEngine:
     # -------------------------------------------------------------------------
 
     def _get_reactions_robust(self, dat_path):
-        """Niezależny parser reakcji podporowych - odporny na błędy w reszcie pliku."""
+        """
+        Niezależny parser reakcji podporowych.
+        Oblicza sumę sił (RF) oraz momentów (RM) względem początku układu (0,0,0).
+        Dla brył (Solid) moment reakcji wynika z pary sił na węzłach podpory.
+        """
         total_rf = [0.0, 0.0, 0.0]
         total_rm = [0.0, 0.0, 0.0]
         
@@ -343,60 +347,71 @@ class FemEngine:
                 for line in f:
                     l_low = line.lower().strip()
                     
-                    # Szukamy początku bloku reakcji
+                    # 1. Wykrywanie bloku reakcji
+                    # CalculiX nagłówek: "forces (rf) applied to nodes of set nset_surf_support"
                     if "forces" in l_low and "rf" in l_low and "support" in l_low:
                         in_block = True
                         continue
                     
+                    # 2. Wyjście z bloku (gdy zaczyna się inny output)
                     if in_block:
-                        # 1. Sprawdź, czy CalculiX podał sumę "total force"
-                        if "total force" in l_low:
-                            parts = line.split(":")[-1].split()
-                            # Szukamy 3 ostatnich liczb (Fx, Fy, Fz)
-                            nums = []
-                            for p in parts:
-                                try: nums.append(float(p))
-                                except: pass
-                            if len(nums) >= 3:
-                                total_rf = nums[-3:]
-                            # Po total force blok się kończy
-                            break 
-                        
-                        # 2. Zabezpieczenie przed wyjściem z bloku (nowy nagłówek)
                         if "stresses" in l_low or "displacements" in l_low or "buckling" in l_low:
                             break
-                        
-                        # 3. Parsowanie wierszy węzłów
+                        if "total force" in l_low: # Ignorujemy podsumowanie CCX, liczymy sami dokładniej
+                            continue
+                            
+                        # 3. Parsowanie linii z danymi węzła
                         parts = line.split()
                         if not parts: continue
+                        
+                        # Sprawdzamy czy linia zaczyna się od ID węzła
                         if parts[0].isdigit():
                             try:
                                 nid = int(parts[0])
-                                f_vec = [float(parts[1]), float(parts[2]), float(parts[3])]
-                                node_forces[nid] = f_vec
+                                # Naprawa formatowania CCX (np. 1.234-10 sklejone z E)
+                                # Pobieramy 3 kolejne wartości jako siły Fx, Fy, Fz
+                                vals = []
+                                for p in parts[1:]:
+                                    # Hack na dziwne formaty liczb typu 1.000-10 (brak E)
+                                    if '-' in p[1:] and 'e' not in p.lower():
+                                        p = p.replace('-', 'e-')
+                                    try: vals.append(float(p))
+                                    except: pass
+                                
+                                if len(vals) >= 3:
+                                    node_forces[nid] = vals[:3]
                             except: pass
-        except: pass
+        except Exception as e:
+            print(f"[FEM] Błąd parsowania reakcji: {e}")
 
-        # Jeśli nie znaleziono linii "total force", sumujemy ręcznie z węzłów
-        if total_rf == [0.0, 0.0, 0.0] and node_forces:
+        # 4. Sumowanie Sił i Momentów
+        # Moment M = r x F (iloczyn wektorowy)
+        # r = [x, y, z] węzła, F = [fx, fy, fz] reakcji
+        
+        if node_forces and self.mapper and self.mapper.loaded:
             sum_f = [0.0, 0.0, 0.0]
-            for f_vec in node_forces.values():
+            sum_m = [0.0, 0.0, 0.0]
+            
+            for nid, f_vec in node_forces.items():
+                # Suma Sił
                 sum_f[0] += f_vec[0]
                 sum_f[1] += f_vec[1]
                 sum_f[2] += f_vec[2]
-            total_rf = sum_f
-
-        # Obliczenie Momentów (M = r x F) względem (0,0,0)
-        if self.mapper and self.mapper.loaded and node_forces:
-            sum_m = [0.0, 0.0, 0.0]
-            for nid, f_vec in node_forces.items():
+                
+                # Suma Momentów
                 if nid in self.mapper.node_map_dict:
-                    x, y, z = self.mapper.node_map_dict[nid]
-                    fx, fy, fz = f_vec
-                    # Iloczyn wektorowy
+                    coords = self.mapper.node_map_dict[nid] # [x, y, z]
+                    x, y, z = coords[0], coords[1], coords[2]
+                    fx, fy, fz = f_vec[0], f_vec[1], f_vec[2]
+                    
+                    # Mx = y*Fz - z*Fy
                     sum_m[0] += (y * fz - z * fy)
+                    # My = z*Fx - x*Fz
                     sum_m[1] += (z * fx - x * fz)
+                    # Mz = x*Fy - y*Fx
                     sum_m[2] += (x * fy - y * fx)
+            
+            total_rf = sum_f
             total_rm = sum_m
             
         return total_rf, total_rm

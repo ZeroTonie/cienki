@@ -24,30 +24,21 @@ class GeometryGeneratorShell:
         except: pass
 
     def _finalize_gmsh(self):
-        # Nie zamykamy całkowicie, aby nie psuć sesji w GUI, 
-        # ale w trybie wsadowym można tu dodać gmsh.finalize()
         pass
 
     def generate_model(self, params):
-        """
-        Generuje model powłokowy (Shell) na podstawie płaszczyzn środkowych (Mid-Surfaces).
-        Układ współrzędnych:
-          X: Długość (0 = Utwierdzenie, L = Obciążenie)
-          Y: Wysokość (0 = Środek grubości płaskownika)
-          Z: Szerokość
-        """
         self._prepare_gmsh()
         try:
-            # --- 1. ODCZYT PARAMETRÓW I KONFIGURACJA GMSH ---
+            # --- 1. KONFIGURACJA ---
             sys_res = params.get('system_resources', {})
             gmsh.option.setNumber("General.NumThreads", int(sys_res.get('num_threads', 4)))
-
-            mesh_cfg = params.get('mesh_size', {})
-            lc_global = float(mesh_cfg.get('global', 15.0))
-            order = int(mesh_cfg.get('order', 1))
             
-            # Algorytm 6 = Frontal-Delaunay for 2D (bardzo dobry dla powłok)
-            gmsh.option.setNumber("Mesh.Algorithm", 6) 
+            mesh_cfg = params.get('mesh_size', {})
+            lc_global = float(mesh_cfg.get('global', 20.0))
+            order = int(mesh_cfg.get('order', 2))
+            
+            # Algorytm 6 (Frontal-Delaunay for 2D) jest najlepszy dla powłok
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.ElementOrder", order)
 
             p_data = params['profile_data']
@@ -59,210 +50,166 @@ class GeometryGeneratorShell:
             if not os.path.exists(out_dir): os.makedirs(out_dir)
             factory = gmsh.model.occ
 
-            # Wymiary Geometryczne Profilu (Ceownika)
+            # Wymiary
             hc = float(p_data['hc'])
             bc = float(p_data['bc'])
             twc = float(p_data['twc'])
             tfc = float(p_data['tfc'])
-            rc = float(p_data.get('rc', 0.0)) # Promień (opcjonalny w modelu shell uproszczonym)
-            
-            # Wymiary Płaskownika
             tp = float(pl_data['tp'])
             bp = float(pl_data['bp'])
 
-            # --- 2. OBLICZANIE WSPÓŁRZĘDNYCH PŁASZCZYZN ŚRODKOWYCH (MID-SURFACES) ---
-            # Kluczowe założenie: Y=0 znajduje się w geometrycznym środku płaskownika.
+            # --- 2. BUDOWA PROFILI (LINIE 1D NA PŁASZCZYŹNIE X=0) ---
             
-            # PŁASKOWNIK (PLATE)
-            # Fizycznie: od Y = -tp/2 do Y = +tp/2.
-            # Środek (Mid-surface): Y = 0.0
-            y_plate_mid = 0.0
+            # Współrzędne Y (płaszczyzny środkowe - mid-surfaces)
+            y_plate = 0.0
+            # Dół stopki fizycznie styka się z górą płaskownika (tp/2).
+            # Środek stopki dolnej = tp/2 + tfc/2
+            y_web_bot = tp/2.0 + tfc/2.0
+            y_web_top = tp/2.0 + hc - tfc/2.0
             
-            # Płaszczyzna styku fizycznego (Góra płaskownika / Dół ceownika)
-            y_interface = tp / 2.0
+            # Współrzędne Z
+            z_plate_L = -bp/2.0
+            z_plate_R = bp/2.0
+            z_web_L = -bp/2.0 + twc/2.0
+            z_web_R = bp/2.0 - twc/2.0
             
-            # CEOWNIK (CHANNEL)
-            # Fizycznie stopka dolna zaczyna się na y_interface.
-            # Środek stopki dolnej: y_interface + połowa grubości stopki
-            y_flange_bot_mid = y_interface + (tfc / 2.0)
-            
-            # Środek stopki górnej: y_interface + wysokość całkowita - połowa grubości stopki
-            y_flange_top_mid = y_interface + hc - (tfc / 2.0)
-            
-            # Pozycja Z środników (Webs)
-            # Fizycznie zewnętrzna krawędź konstrukcji to +/- bp/2.
-            # Środek ścianki środnika jest cofnięty o twc/2 do wewnątrz.
-            z_web_left = -(bp / 2.0) + (twc / 2.0)
-            z_web_right = (bp / 2.0) - (twc / 2.0)
+            # Długość stopki (od osi środnika)
+            flange_len = bc - twc/2.0
 
-            # --- 3. GENEROWANIE GEOMETRII (POWIERZCHNIE) ---
+            # A. PŁASKOWNIK (Linia pozioma)
+            pt_pl_1 = factory.addPoint(0, y_plate, z_plate_L)
+            pt_pl_2 = factory.addPoint(0, y_plate, z_plate_R)
+            l_plate = factory.addLine(pt_pl_1, pt_pl_2)
             
-            # Funkcja pomocnicza: Tworzy prostokąt w płaszczyźnie poziomej (XZ)
-            def create_rect_xz(y_level, z_min, z_max, length, tag_prefix):
-                p1 = factory.addPoint(0, y_level, z_min)
-                p2 = factory.addPoint(length, y_level, z_min)
-                p3 = factory.addPoint(length, y_level, z_max)
-                p4 = factory.addPoint(0, y_level, z_max)
-                
-                l1 = factory.addLine(p1, p2)
-                l2 = factory.addLine(p2, p3)
-                l3 = factory.addLine(p3, p4)
-                l4 = factory.addLine(p4, p1)
-                
-                loop = factory.addCurveLoop([l1, l2, l3, l4])
-                surf = factory.addPlaneSurface([loop])
-                return surf
+            # B. CEOWNIK LEWY (Kształt C)
+            # Stopka dolna (do wewnątrz)
+            p_LB_root = factory.addPoint(0, y_web_bot, z_web_L)
+            p_LB_tip = factory.addPoint(0, y_web_bot, z_web_L + flange_len) 
+            l_LB_flange = factory.addLine(p_LB_tip, p_LB_root)
+            
+            # Środnik (Pionowo)
+            p_LT_root = factory.addPoint(0, y_web_top, z_web_L)
+            l_L_web = factory.addLine(p_LB_root, p_LT_root)
+            
+            # Stopka górna (do wewnątrz)
+            p_LT_tip = factory.addPoint(0, y_web_top, z_web_L + flange_len)
+            l_LT_flange = factory.addLine(p_LT_root, p_LT_tip)
+            
+            # C. CEOWNIK PRAWY (Kształt C odwrócony)
+            # Stopka dolna
+            p_RB_root = factory.addPoint(0, y_web_bot, z_web_R)
+            p_RB_tip = factory.addPoint(0, y_web_bot, z_web_R - flange_len) 
+            l_RB_flange = factory.addLine(p_RB_tip, p_RB_root)
+            
+            # Środnik
+            p_RT_root = factory.addPoint(0, y_web_top, z_web_R)
+            l_R_web = factory.addLine(p_RB_root, p_RT_root)
+            
+            # Stopka górna
+            p_RT_tip = factory.addPoint(0, y_web_top, z_web_R - flange_len)
+            l_RT_flange = factory.addLine(p_RT_root, p_RT_tip)
 
-            # A. PŁASKOWNIK
-            # Rozciąga się na całej szerokości bp
-            s_plate = create_rect_xz(y_plate_mid, -bp/2.0, bp/2.0, L, "PLATE")
-            
-            # B. CEOWNIKI (Złożone z 3 płaszczyzn: Stopka dół, Środnik, Stopka góra)
-            def create_channel(z_web_pos, direction_z):
-                # direction_z: +1 (w prawo/do środka od lewej), -1 (w lewo/do środka od prawej)
-                # Długość stopki w osiach: bc - twc/2
-                flange_len = bc - (twc / 2.0)
-                z_tip = z_web_pos + (flange_len * direction_z)
-                
-                z_min = min(z_web_pos, z_tip)
-                z_max = max(z_web_pos, z_tip)
-                
-                # Stopka Dolna i Górna
-                s_flange_bot = create_rect_xz(y_flange_bot_mid, z_min, z_max, L, "FBOT")
-                s_flange_top = create_rect_xz(y_flange_top_mid, z_min, z_max, L, "FTOP")
-                
-                # Środnik (Płaszczyzna XY - pionowa)
-                p1 = factory.addPoint(0, y_flange_bot_mid, z_web_pos)
-                p2 = factory.addPoint(L, y_flange_bot_mid, z_web_pos)
-                p3 = factory.addPoint(L, y_flange_top_mid, z_web_pos)
-                p4 = factory.addPoint(0, y_flange_top_mid, z_web_pos)
-                
-                lw1 = factory.addLine(p1, p2) # Dolna krawędź środnika
-                lw2 = factory.addLine(p2, p3)
-                lw3 = factory.addLine(p3, p4)
-                lw4 = factory.addLine(p4, p1)
-                
-                loop_w = factory.addCurveLoop([lw1, lw2, lw3, lw4])
-                s_web = factory.addPlaneSurface([loop_w])
-                
-                # Zwracamy listę powierzchni
-                return [s_flange_bot, s_web, s_flange_top]
+            factory.synchronize()
 
-            # Lewy Ceownik
-            parts_left = create_channel(z_web_left, 1.0)
+            # --- 3. EKSTRUZJA (WYCIĄGNIĘCIE WZDŁUŻ X) ---
+            # Tworzymy listę linii do wyciągnięcia
+            # Kolejność jest WAŻNA dla późniejszego mapowania powierzchni
+            profiles_to_extrude = [
+                (1, l_plate),      # Index 0 -> Powierzchnia Płaskownika
+                (1, l_LB_flange),  # Index 1 -> Lewy Dół
+                (1, l_L_web),      # Index 2 -> Lewy Środnik
+                (1, l_LT_flange),  # Index 3 -> Lewa Góra
+                (1, l_RB_flange),  # Index 4 -> Prawy Dół
+                (1, l_R_web),      # Index 5 -> Prawy Środnik
+                (1, l_RT_flange)   # Index 6 -> Prawa Góra
+            ]
             
-            # Prawy Ceownik
-            parts_right = create_channel(z_web_right, -1.0)
+            # Wyciągamy wszystko naraz o długość L w osi X
+            ext_results = factory.extrude(profiles_to_extrude, L, 0, 0)
+            factory.synchronize()
+
+            # Odzyskiwanie tagów powierzchni (dim=2) z wyników ekstruzji
+            surfs = [tag for dim, tag in ext_results if dim == 2]
+            
+            # Przypisanie do zmiennych
+            s_plate = surfs[0]
+            s_L_fbot, s_L_web, s_L_ftop = surfs[1], surfs[2], surfs[3]
+            s_R_fbot, s_R_web, s_R_ftop = surfs[4], surfs[5], surfs[6]
+
+            # --- 4. GRUPY FIZYCZNE (MATERIAL ASSIGNMENT) ---
+            gmsh.model.addPhysicalGroup(2, [s_plate], name="SHELL_PLATE")
+            gmsh.model.addPhysicalGroup(2, [s_L_web, s_R_web], name="SHELL_WEBS")
+            gmsh.model.addPhysicalGroup(2, [s_L_fbot, s_L_ftop, s_R_fbot, s_R_ftop], name="SHELL_FLANGES")
+
+            # --- 5. PRZYGOTOWANIE SPAWÓW (EMBED) ---
+            # Rzutujemy linie środników na płaskownik, by stworzyć węzły dla wiązania TIE
+            
+            # Linie na płaskowniku (Y=0) pod środnikami
+            pt_wL_1 = factory.addPoint(0, y_plate, z_web_L)
+            pt_wL_2 = factory.addPoint(L, y_plate, z_web_L)
+            l_weld_L = factory.addLine(pt_wL_1, pt_wL_2)
+            
+            pt_wR_1 = factory.addPoint(0, y_plate, z_web_R)
+            pt_wR_2 = factory.addPoint(L, y_plate, z_web_R)
+            l_weld_R = factory.addLine(pt_wR_1, pt_wR_2)
             
             factory.synchronize()
             
-            # --- 4. ZSZYWANIE WEWNĘTRZNE CEOWNIKÓW (FRAGMENT) ---
-            # Zszywamy stopki ze środnikiem w ramach jednego ceownika, aby węzły w narożach były wspólne.
-            # UWAGA: Płaskownik pozostaje oddzielną geometrią (nie zszywamy go z ceownikiem, bo jest luka Y).
+            # Wtapiamy (Embed) te linie w powierzchnię płaskownika
+            gmsh.model.mesh.embed(1, [l_weld_L, l_weld_R], 2, s_plate)
             
-            f_left, _ = factory.fragment([(2, s) for s in parts_left], [])
-            f_right, _ = factory.fragment([(2, s) for s in parts_right], [])
-            
-            factory.synchronize()
-            
-            # Odzyskujemy tagi powierzchni po fragmencie (mogły ulec zmianie)
-            final_surfs_left = [tag for dim, tag in f_left if dim == 2]
-            final_surfs_right = [tag for dim, tag in f_right if dim == 2]
-            final_surf_plate = s_plate
+            # Definicja grup Master (linie na płaskowniku)
+            gmsh.model.addPhysicalGroup(1, [l_weld_L], name="LINE_WELD_L_MASTER")
+            gmsh.model.addPhysicalGroup(1, [l_weld_R], name="LINE_WELD_R_MASTER")
 
-            # --- 5. DEFINICJA GRUP FIZYCZNYCH 2D (SEKCJE / MATERIAŁY) ---
-            
-            gmsh.model.addPhysicalGroup(2, [final_surf_plate], name="SHELL_PLATE")
-            
-            # Rozdzielamy Środniki i Stopki (dla przypisania różnych grubości w Solverze)
-            # Używamy Bounding Box do klasyfikacji: 
-            # Środnik jest wysoki w Y (dy > dz), Stopka jest szeroka w Z (dz > dy).
-            
-            def classify_channel_surfs(tags):
-                webs = []
-                flanges = []
-                for t in tags:
-                    xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(2, t)
-                    dy = abs(ymax - ymin)
-                    dz = abs(zmax - zmin)
-                    if dy > dz: webs.append(t) # Pionowy -> Środnik
-                    else: flanges.append(t)    # Poziomy -> Stopka
-                return webs, flanges
+            # Definicja grup Slave (dolne krawędzie środników)
+            # Funkcja pomocnicza do znalezienia linii na krawędzi powierzchni
+            def get_boundary_lines_at_y(surf_tag, y_target, tol=0.1):
+                found_lines = []
+                bounds = gmsh.model.getBoundary([(2, surf_tag)], oriented=False)
+                for dim, tag in bounds:
+                    # Sprawdzamy współrzędną Y środka linii
+                    xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(1, tag)
+                    y_mid = (ymin + ymax) / 2.0
+                    if abs(y_mid - y_target) < tol:
+                        found_lines.append(tag)
+                return found_lines
 
-            l_webs, l_flanges = classify_channel_surfs(final_surfs_left)
-            r_webs, r_flanges = classify_channel_surfs(final_surfs_right)
+            # Szukamy dolnych krawędzi środników (na poziomie y_web_bot)
+            # Uwaga: Środnik zaczyna się od y_web_bot.
+            slave_L_lines = get_boundary_lines_at_y(s_L_web, y_web_bot)
+            slave_R_lines = get_boundary_lines_at_y(s_R_web, y_web_bot)
             
-            gmsh.model.addPhysicalGroup(2, l_webs + r_webs, name="SHELL_WEBS")
-            gmsh.model.addPhysicalGroup(2, l_flanges + r_flanges, name="SHELL_FLANGES")
+            if slave_L_lines: gmsh.model.addPhysicalGroup(1, slave_L_lines, name="LINE_WELD_L_SLAVE")
+            if slave_R_lines: gmsh.model.addPhysicalGroup(1, slave_R_lines, name="LINE_WELD_R_SLAVE")
 
-            # --- 6. PRZYGOTOWANIE DO *TIE (WELD LINES - EMBED) ---
-            # Aby wiązanie *TIE działało idealnie, siatka płaskownika musi mieć węzły 
-            # dokładnie pod środnikami ceowników.
-            # Używamy funkcji `embed` (wtopienie), rzutując linię środnika na płaskownik.
+            # --- 6. SIATKOWANIE ---
+            # Ustawiamy rozmiar siatki globalnie na punkty
+            gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc_global)
             
-            # Tworzymy linie rzutu na poziomie płaskownika (Y = y_plate_mid)
-            pt_w1 = factory.addPoint(0, y_plate_mid, z_web_left)
-            pt_w2 = factory.addPoint(L, y_plate_mid, z_web_left)
-            l_weld_left_proj = factory.addLine(pt_w1, pt_w2)
-            
-            pt_w3 = factory.addPoint(0, y_plate_mid, z_web_right)
-            pt_w4 = factory.addPoint(L, y_plate_mid, z_web_right)
-            l_weld_right_proj = factory.addLine(pt_w3, pt_w4)
-            
-            # Wtapiamy te linie w powierzchnię płaskownika
-            factory.synchronize()
-            gmsh.model.mesh.embed(1, [l_weld_left_proj, l_weld_right_proj], 2, final_surf_plate)
-            
-            # Definiujemy grupy fizyczne dla linii wiążących (1D)
-            # MASTER: Linie na płaskowniku
-            gmsh.model.addPhysicalGroup(1, [l_weld_left_proj], name="LINE_WELD_L_MASTER")
-            gmsh.model.addPhysicalGroup(1, [l_weld_right_proj], name="LINE_WELD_R_MASTER")
-            
-            # SLAVE: Dolne krawędzie ceowników (Środników)
-            # Musimy znaleźć ich ID w przestrzeni. Są na Y = y_flange_bot_mid i Z = z_web_left/right.
-            def find_line_in_box(xmin, ymin, zmin, xmax, ymax, zmax, tolerance=0.1):
-                return gmsh.model.getEntitiesInBoundingBox(
-                    xmin-tolerance, ymin-tolerance, zmin-tolerance,
-                    xmax+tolerance, ymax+tolerance, zmax+tolerance, dim=1
-                )
-
-            slaves_L = find_line_in_box(0, y_flange_bot_mid, z_web_left, L, y_flange_bot_mid, z_web_left)
-            slaves_L_tags = [t for d, t in slaves_L]
-            
-            slaves_R = find_line_in_box(0, y_flange_bot_mid, z_web_right, L, y_flange_bot_mid, z_web_right)
-            slaves_R_tags = [t for d, t in slaves_R]
-            
-            if slaves_L_tags: gmsh.model.addPhysicalGroup(1, slaves_L_tags, name="LINE_WELD_L_SLAVE")
-            if slaves_R_tags: gmsh.model.addPhysicalGroup(1, slaves_R_tags, name="LINE_WELD_R_SLAVE")
-
-            # --- 7. GENEROWANIE SIATKI ---
-            self.log("Generowanie siatki 2D...")
+            self.log("Generowanie siatki...")
             gmsh.model.mesh.generate(2)
             
             if order == 2:
-                self.log("Konwersja do elementów 2. rzędu...")
+                self.log("Konwersja do elementow 2. rzedu...")
                 gmsh.model.mesh.setOrder(2)
 
-            # --- 8. EKSPORT DANYCH (PLIKI I GRUPY WĘZŁÓW) ---
+            # --- 7. EKSPORT ---
             path_inp = os.path.join(out_dir, f"{name}_shell.inp")
             path_msh = os.path.join(out_dir, f"{name}_shell.msh")
             groups_json = os.path.join(out_dir, f"{name}_shell_groups.json")
             nodes_csv = os.path.join(out_dir, f"{name}_shell_nodes.csv")
 
-            # Zapisz geometrię (.inp dla CalculiX, .msh dla PyVista)
             gmsh.write(path_inp)
             gmsh.write(path_msh)
             
-            # --- TWORZENIE GRUP WĘZŁÓW (NSET) DLA SOLVERA ---
+            # --- 8. GRUPY WĘZŁÓW DLA SOLVERA ---
+            # Tolerancja 1.0mm jest bezpieczna przy tej metodzie
+            supp_nodes = self._get_nodes_in_x_plane(0.0, tol=1.0)
+            load_nodes = self._get_nodes_in_x_plane(L, tol=1.0)
             
-            # A. Support (Utwierdzenie) - Wszystkie węzły na X=0
-            supp_nodes = self._get_nodes_in_x_plane(0.0)
-            
-            # B. Load (Obciążenie) - Wszystkie węzły na X=L
-            # To jest KLUCZOWE dla metody Rigid Body: Te węzły będą "Slave'ami" dla Punktu Referencyjnego.
-            load_nodes = self._get_nodes_in_x_plane(L)
-            
-            # C. Grupy węzłów dla spoin (opcjonalne, jeśli solver używa surface-to-surface, ale przydatne)
+            self.log(f"Wezly Support: {len(supp_nodes)}, Load: {len(load_nodes)}")
+
             weld_groups = {}
             for gname in ["LINE_WELD_L_MASTER", "LINE_WELD_R_MASTER", "LINE_WELD_L_SLAVE", "LINE_WELD_R_SLAVE"]:
                 nodes = self._get_nodes_from_physical_group(1, gname)
@@ -270,14 +217,13 @@ class GeometryGeneratorShell:
 
             groups_data = {
                 "NSET_SUPPORT": supp_nodes,
-                "NSET_LOAD": load_nodes, # <-- RIGID BODY SLAVES
+                "NSET_LOAD": load_nodes,
                 **weld_groups
             }
             
             with open(groups_json, 'w') as f:
                 json.dump(groups_data, f)
-
-            # Eksport mapy węzłów (dla post-processingu w Pythonie)
+            
             self._export_node_map(nodes_csv)
 
             return {
@@ -288,7 +234,7 @@ class GeometryGeneratorShell:
                 },
                 "stats": {"nodes": gmsh.model.mesh.getNodes()[0].size}
             }
-
+            
         except Exception as e:
             self.log(f"CRITICAL ERROR: {e}")
             import traceback
@@ -297,18 +243,16 @@ class GeometryGeneratorShell:
         finally:
             self._finalize_gmsh()
 
-    def _get_nodes_in_x_plane(self, x_loc, tol=0.01):
-        """Pobiera ID węzłów leżących na płaszczyźnie X = x_loc"""
+    def _get_nodes_in_x_plane(self, x_loc, tol=1.0):
+        """Pobiera ID węzłów leżących na płaszczyźnie X = x_loc (z dużą tolerancją)."""
         node_tags, coords, _ = gmsh.model.mesh.getNodes()
         selected = []
-        # coords to płaska lista [x1, y1, z1, x2, y2, z2...]
         for i in range(len(node_tags)):
             if abs(coords[3*i] - x_loc) < tol:
                 selected.append(int(node_tags[i]))
         return selected
 
     def _get_nodes_from_physical_group(self, dim, name):
-        """Pobiera węzły należące do danej grupy fizycznej (np. linii spoiny)."""
         try:
             group_tags = gmsh.model.getPhysicalGroups(dim)
             target_tag = -1
@@ -316,21 +260,15 @@ class GeometryGeneratorShell:
                 if gmsh.model.getPhysicalName(d, t) == name:
                     target_tag = t
                     break
-            
             if target_tag == -1: return []
-
-            # Pobierz encje w grupie
-            entities = gmsh.model.getEntitiesForPhysicalGroup(dim, target_tag)
             
+            entities = gmsh.model.getEntitiesForPhysicalGroup(dim, target_tag)
             all_nodes = set()
             for e in entities:
-                # includeBoundary=True łapie węzły końcowe linii
-                tags, _, _ = gmsh.model.mesh.getNodes(dim, e, includeBoundary=True) 
+                tags, _, _ = gmsh.model.mesh.getNodes(dim, e, includeBoundary=True)
                 for t in tags: all_nodes.add(int(t))
-            
             return list(all_nodes)
-        except:
-            return []
+        except: return []
 
     def _export_node_map(self, path):
         tags, coords, _ = gmsh.model.mesh.getNodes()

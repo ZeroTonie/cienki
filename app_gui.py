@@ -2767,6 +2767,8 @@ class MainWindow(QMainWindow):
             self.tab4.plotter.close()
         if hasattr(self, 'tab5') and hasattr(self.tab5, 'plotter') and self.tab5.plotter:
             self.tab5.plotter.close()
+        if hasattr(self, 'tab6') and hasattr(self.tab6, 'plotter') and self.tab6.plotter:
+            self.tab6.plotter.close()
         if hasattr(self, 'tab7') and hasattr(self.tab7, 'plotter') and self.tab7.plotter:
             self.tab7.plotter.close()
         event.accept()
