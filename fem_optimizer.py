@@ -41,11 +41,35 @@ class FemOptimizer:
         bp = float(candidate_data.get("Input_Geo_bp", 0))
         cid = f"{prof}_tp{int(tp)}_bp{int(bp)}"
         
-        # Pobranie ustawień z GUI (z domyślnymi wartościami)
         max_iter = int(fem_settings.get("max_iterations", 3))
         tol = float(fem_settings.get("tolerance", 0.02))
         mesh_fact = float(fem_settings.get("refinement_factor", 0.7))
-        curr_mesh = float(fem_settings.get("mesh_start_size", 15.0))
+        
+        # --- NOWA LOGIKA ROZMIARU SIATKI ---
+        mesh_mode = fem_settings.get("mesh_mode", "absolute")
+        start_val = float(fem_settings.get("mesh_start_size", 15.0))
+        
+        if mesh_mode == "relative":
+            # 1. Pobieramy grubości wszystkich ścianek profilu
+            thicknesses = []
+            if 'Input_UPE_twc' in candidate_data: thicknesses.append(float(candidate_data['Input_UPE_twc']))
+            if 'Input_UPE_tfc' in candidate_data: thicknesses.append(float(candidate_data['Input_UPE_tfc']))
+            if 'Input_Geo_tp' in candidate_data: thicknesses.append(float(candidate_data['Input_Geo_tp']))
+            
+            # Znajdujemy najcieńszą ściankę (krytyczną dla elementów Solid)
+            min_t = min(thicknesses) if thicknesses else 10.0
+            
+            # 2. Przeliczamy gęstość na rozmiar [mm]
+            # density = elementy na grubość (np. 2.0)
+            # size = grubość / density
+            density = max(0.1, start_val) # Zabezpieczenie przed 0
+            curr_mesh = min_t / density
+            
+            log(f"[AUTO-MESH] Tryb Względny: Najcieńsza ścianka = {min_t:.2f} mm")
+            log(f"[AUTO-MESH] Gęstość zadana = {density} el/gr -> Startowy rozmiar siatki = {curr_mesh:.2f} mm")
+        else:
+            # Tryb klasyczny (Bezwzględny)
+            curr_mesh = start_val
         
         # Pobranie limitu równań z ustawień (domyślnie 2 miliony)
         eq_limit = int(fem_settings.get("eq_limit", 2000000))
@@ -80,6 +104,7 @@ class FemOptimizer:
         converged = "NOT_DEFINED" if is_batch else False
         
         last_vm = 0.0
+        mesh_size_of_last_run = curr_mesh
         final_path = ""
         final_res = {}
 
@@ -88,6 +113,8 @@ class FemOptimizer:
             if self.stop_requested: 
                 log("  ! Przerwano na żądanie użytkownika. ||| [Status: Przerwano]")
                 break
+            
+            mesh_size_of_last_run = curr_mesh
             
             iter_name = f"Iter_{i}_Mesh{curr_mesh:.1f}"
             work_dir = self.router.get_path("MES_WORK", iter_name, subdir=cid)
@@ -331,6 +358,7 @@ class FemOptimizer:
                     final_res = res
                     log("  >>> ZBIEŻNOŚĆ OSIĄGNIĘTA.")
                     final_path = work_dir 
+                    last_vm = vm
                     break
             
             last_vm = vm
@@ -358,6 +386,6 @@ class FemOptimizer:
         final_res["converged"] = converged
         final_res["iterations"] = i 
         final_res["final_stress"] = last_vm
-        final_res["final_mesh_size"] = curr_mesh
+        final_res["final_mesh_size"] = mesh_size_of_last_run
         
         return final_res

@@ -148,13 +148,13 @@ class FemEngineShell:
         if "LINE_WELD_L_SLAVE" in self.groups and "LINE_WELD_L_MASTER" in self.groups:
             if self.groups["LINE_WELD_L_SLAVE"] and self.groups["LINE_WELD_L_MASTER"]:
                 deck.append(f"*TIE, NAME=WELD_L, POSITION TOLERANCE={tie_tol}")
-                deck.append("NSET_LINE_WELD_L_SLAVE, NSET_LINE_WELD_L_MASTER")
+                deck.append("LINE_WELD_L_SLAVE, LINE_WELD_L_MASTER")  # <--- POPRAWIONE
         
         # Prawy spaw
         if "LINE_WELD_R_SLAVE" in self.groups and "LINE_WELD_R_MASTER" in self.groups:
             if self.groups["LINE_WELD_R_SLAVE"] and self.groups["LINE_WELD_R_MASTER"]:
                 deck.append(f"*TIE, NAME=WELD_R, POSITION TOLERANCE={tie_tol}")
-                deck.append("NSET_LINE_WELD_R_SLAVE, NSET_LINE_WELD_R_MASTER")
+                deck.append("LINE_WELD_R_SLAVE, LINE_WELD_R_MASTER")  # <--- POPRAWIONE
 
         # --- MECHANIZM OBCIĄŻENIA (RIGID ARM) ---
         deck.append("** --- RIGID ARM ---")
@@ -186,7 +186,7 @@ class FemEngineShell:
         
         # Utwierdzenie
         if "NSET_SUPPORT" in self.groups and self.groups["NSET_SUPPORT"]:
-            deck.append("*BOUNDARY\nNSET_NSET_SUPPORT, 1, 6, 0.0")
+            deck.append("*BOUNDARY\nNSET_SUPPORT, 1, 6, 0.0")
         
         # Siły (przykładane do węzła B na ramieniu)
         deck.append("*CLOAD")

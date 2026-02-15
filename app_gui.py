@@ -587,7 +587,7 @@ class OptimizationWorker(QThread):
 
 class FemWorker(QThread):
     log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool)
+    finished_signal = pyqtSignal(bool) # Sygnał na koniec pracy
     data_signal = pyqtSignal(dict)
     processing_signal = pyqtSignal(str)
     notification_signal = pyqtSignal(str, str)
@@ -620,6 +620,33 @@ class FemWorker(QThread):
             tp = float(cand.get("Input_Geo_tp", 10))
             bp = float(cand.get("Input_Geo_bp", 0))
             cid = f"{prof_name}_tp{int(tp)}_bp{int(bp)}"
+
+            # --- [POPRAWKA] Sprawdzenie, czy wynik dla tego kandydata już istnieje ---
+            final_dest = self.optimizer.router.get_path("FINAL", "", subdir=cid)
+            result_file_path = os.path.join(final_dest, "results.json")
+
+            if os.path.exists(result_file_path):
+                self.log_signal.emit(f"\n--- Pomijanie: {prof_name} ({i+1}/{len(self.candidates)}) - wynik już istnieje. ---")
+                try:
+                    with open(result_file_path, 'r') as f:
+                        existing_res = json.load(f)
+                    
+                    data_for_signal = {
+                        'id': cid,
+                        'profile_name': prof_name,
+                        'iterations': existing_res.get('iterations', 'N/A'),
+                        'converged': "IMPORTED",
+                        'final_stress': existing_res.get('MODEL_MAX_VM', 0.0),
+                        'mesh_path': existing_res.get('mesh_path', None)
+                    }
+                    self.data_signal.emit(data_for_signal)
+                    self.log_signal.emit(f"   [INFO] Zaimportowano istniejący wynik. Max VM: {data_for_signal['final_stress']:.2f} MPa")
+                    success_count += 1
+                    continue
+                except Exception as e:
+                    self.log_signal.emit(f"   [WARN] Znaleziono wynik, ale nie można go odczytać: {e}. Przeliczam ponownie.")
+            # --------------------------------------------------------------------
+
             self.processing_signal.emit(cid)
             
             self.log_signal.emit(f"\n--- Przetwarzanie: {prof_name} ({i+1}/{len(self.candidates)}) ---")
@@ -1140,6 +1167,7 @@ class Tab3_Selector(QWidget):
 
 class Tab4_Fem(QWidget):
     batch_finished = pyqtSignal() # Nowy sygnał
+    pilot_finished = pyqtSignal() # Sygnał po zakończeniu pilota
     profile_started = pyqtSignal(str)
 
     def __init__(self):
@@ -1199,9 +1227,17 @@ class Tab4_Fem(QWidget):
         
         field_width = 120
         
-        self.sp_mesh = QDoubleSpinBox(); self.sp_mesh.setValue(15.0); self.sp_mesh.setRange(1.0, 100.0); self.sp_mesh.setSuffix(" mm")
-        self.sp_mesh.setToolTip("Globalny rozmiar elementu skończonego.")
+        # --- NOWOŚĆ: Przełącznik trybu siatkowania ---
+        self.combo_mesh_mode = QComboBox()
+        self.combo_mesh_mode.addItems(["Bezwzględna (mm)", "Względna (el/grubość)"])
+        self.combo_mesh_mode.setFixedWidth(field_width)
+        self.combo_mesh_mode.currentIndexChanged.connect(self.update_mesh_input_style)
+        
+        # Spinbox rozmiaru (zmienne znaczenie)
+        self.sp_mesh = QDoubleSpinBox()
         self.sp_mesh.setFixedWidth(field_width)
+        # Domyślne ustawienie (zostanie nadpisane przez update_mesh_input_style)
+        self.update_mesh_input_style() 
         
         self.sp_fact = QDoubleSpinBox(); self.sp_fact.setValue(0.85); self.sp_fact.setSingleStep(0.1); self.sp_fact.setRange(0.1, 0.99)
         self.sp_fact.setFixedWidth(field_width)
@@ -1209,19 +1245,14 @@ class Tab4_Fem(QWidget):
         self.sp_tol.setFixedWidth(field_width)
         self.sp_iter = QSpinBox(); self.sp_iter.setValue(3); self.sp_iter.setRange(1, 10)
         self.sp_iter.setFixedWidth(field_width)
-        
-        # --- [NOWOŚĆ] ---
         self.sp_step = QDoubleSpinBox(); self.sp_step.setValue(50.0); self.sp_step.setRange(10.0, 500.0); self.sp_step.setSuffix(" mm")
-        self.sp_step.setToolTip("Gęstość zapisu wyników wzdłuż belki (co ile mm tworzyć sondę).")
         self.sp_step.setFixedWidth(field_width)
-        # ----------------
         
-        f_par.addRow("Startowy rozmiar:", self.sp_mesh)
+        f_par.addRow("Tryb rozmiaru:", self.combo_mesh_mode) # <--- DODANO
+        f_par.addRow("Wartość startowa:", self.sp_mesh)
         f_par.addRow("Wsp. zagęszczania:", self.sp_fact)
         f_par.addRow("Tolerancja:", self.sp_tol)
         f_par.addRow("Max iteracji:", self.sp_iter)
-        
-        # --- [NOWOŚĆ] ---
         f_par.addRow("Krok sondy (X):", self.sp_step)
         
         l_inp.addWidget(g_par)
@@ -1458,6 +1489,41 @@ class Tab4_Fem(QWidget):
         lay.addRow("Czas Trwania:", self.lbl_status_time)
         return w
 
+    def update_mesh_input_style(self):
+        """Aktualizuje wygląd pola rozmiaru siatki w zależności od trybu."""
+        
+        # ### NOWOŚĆ: Resetujemy wynik pilota ###
+        self.pilot_final_mesh_size = None 
+        
+        # --- POPRAWKA (Fix błędu startowego) ---
+        # Sprawdzamy czy przyciski zostały już utworzone przez init_ui.
+        # Przy starcie programu ta funkcja jest wołana zanim przyciski powstaną.
+        # [ZMIANA] Usunięto blokowanie przycisku Batch. Teraz można uruchomić batch
+        # bez wcześniejszego pilota, używając ustawień z GUI.
+        # Przycisk pilota jest zarządzany przez receive_data.
+
+        if hasattr(self, 'con'):
+            # To też warto zabezpieczyć, żeby nie spamować konsoli przy starcie
+            if hasattr(self, 'btn_batch'): 
+                self.con.append("<i style='color:gray'>Zmieniono tryb siatki. Poprzedni wynik pilota został wyczyszczony.</i>")
+
+        if self.combo_mesh_mode.currentIndex() == 0: 
+            # Tryb Absolutny (mm)
+            self.sp_mesh.setSuffix(" mm")
+            self.sp_mesh.setRange(1.0, 100.0)
+            self.sp_mesh.setValue(15.0)
+            self.sp_mesh.setToolTip("Globalny, startowy rozmiar elementu w milimetrach.")
+            self.sp_mesh.setSingleStep(1.0)
+        else: 
+            # Tryb Względny (elementy na grubość)
+            self.sp_mesh.setSuffix(" el/gr")
+            self.sp_mesh.setRange(0.5, 10.0)
+            self.sp_mesh.setValue(1.0) # Domyślnie 1 element na grubość
+            self.sp_mesh.setToolTip("Liczba elementów przypadająca na grubość najcieńszej ścianki.\n"
+                                    "Np. 2.0 oznacza, że rozmiar elementu będzie połową grubości ścianki.\n"
+                                    "Wartość ta jest startowa i będzie zagęszczana w kolejnych iteracjach.")
+            self.sp_mesh.setSingleStep(0.5)
+    
     def reset_status_panel(self):
         self.lbl_status_step.setText("Oczekiwanie...")
         self.lbl_status_nodes.setText("-")
@@ -1557,7 +1623,9 @@ class Tab4_Fem(QWidget):
                 if nm: probes[nm] = (fy, fz)
             except: pass
 
-        # Zmiana: Przekazujemy tryb wyboru Y_ref, a nie statyczną wartość
+        # Pobieranie trybu
+        mode_str = "absolute" if self.combo_mesh_mode.currentIndex() == 0 else "relative"
+
         fem_loads = {
             "yc_ref_mode": self.yc_mode_group.checkedId(),
             "yc_ref_manual_value": self.inp_fem_yc.text(),
@@ -1570,17 +1638,18 @@ class Tab4_Fem(QWidget):
         }
 
         return {
-            "mesh_start_size": self.sp_mesh.value(),
+            "mesh_mode": mode_str,  # <--- NOWY KLUCZ
+            "mesh_start_size": self.sp_mesh.value(), # Wartość w mm LUB mnożnik gęstości
             "refinement_factor": self.sp_fact.value(),
             "tolerance": self.sp_tol.value()/100.0,
             "max_iterations": self.sp_iter.value(),
             "mesh_order": 2 if self.combo_ord.currentIndex() == 1 else 1,
-            "refinement_zones": zones,
-            "custom_probes": probes,
+            "refinement_zones": zones, # zdefiniowane wcześniej w metodzie
+            "custom_probes": probes,   # zdefiniowane wcześniej w metodzie
             "cores_mesh": self.sp_cores_mesh.value(),
             "cores_solver": self.sp_cores_ccx.value(),
             "eq_limit": self.sp_eq_limit.value(),
-            "fem_loads": fem_loads,
+            "fem_loads": fem_loads,    # zdefiniowane wcześniej w metodzie
             "step": self.sp_step.value()
         }
 
@@ -1718,6 +1787,9 @@ class Tab4_Fem(QWidget):
                 if c_status == "NOT_DEFINED":
                     conv_item = QTableWidgetItem("BATCH")
                     conv_item.setBackground(QColor(100, 100, 50))
+                elif c_status == "IMPORTED":
+                    conv_item = QTableWidgetItem("IMPORT")
+                    conv_item.setBackground(QColor(50, 100, 100))
                 else:
                     conv_item = QTableWidgetItem("TAK" if c_status else "NIE")
                     conv_item.setBackground(QColor(50, 100, 50) if c_status else QColor(100, 50, 50))
@@ -1725,6 +1797,15 @@ class Tab4_Fem(QWidget):
                 self.tbl_res.setItem(r, 3, QTableWidgetItem(f"{data.get('final_stress',0):.2f}"))
                 self.tbl_res.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
                 break
+
+    def _get_candidate_thickness(self, cand):
+        """Pomocnicza funkcja do wyznaczania grubości krytycznej kandydata (dla GUI)."""
+        thicknesses = []
+        # Pobieramy te same klucze co w fem_optimizer
+        if 'Input_UPE_twc' in cand: thicknesses.append(float(cand['Input_UPE_twc']))
+        if 'Input_UPE_tfc' in cand: thicknesses.append(float(cand['Input_UPE_tfc']))
+        if 'Input_Geo_tp' in cand: thicknesses.append(float(cand['Input_Geo_tp']))
+        return min(thicknesses) if thicknesses else 10.0
 
     def on_pilot_done(self):
         self.timer.stop()
@@ -1734,12 +1815,40 @@ class Tab4_Fem(QWidget):
         self.btn_batch.setEnabled(True)
         self.con.append("Pilot zakończony.")
 
-        # Zapisz wynikową siatkę z udanego pilota do użycia w batchu
+        # [ZMIANA] Emituj sygnał po zakończeniu pilota, aby odświeżyć wyniki
+        self.pilot_finished.emit()
+        # --- INTELIGENTNE PRZEKAZANIE WYNIKÓW PILOTA DO BATCHA ---
         if self.last_pilot_data and self.last_pilot_data.get('converged'):
-            final_mesh_size = self.last_pilot_data.get('final_mesh_size')
-            if final_mesh_size:
-                self.pilot_final_mesh_size = final_mesh_size
-                self.con.append(f"<b>[INFO] Ustawienia pilota zapisane. Siatka: {final_mesh_size:.2f} mm</b>")
+            final_mesh_size_mm = self.last_pilot_data.get('final_mesh_size')
+            
+            if final_mesh_size_mm:
+                mode = "relative" if self.combo_mesh_mode.currentIndex() == 1 else "absolute"
+                
+                if mode == "absolute":
+                    # Tryb Bezwzględny: Przekazujemy wymiar w mm
+                    self.pilot_final_mesh_size = final_mesh_size_mm
+                    self.con.append(f"<b>[INFO] Pilot (Abs): Ustawiono start Batcha na {final_mesh_size_mm:.2f} mm</b>")
+                
+                else:
+                    # Tryb Względny: Musimy odtworzyć GĘSTOŚĆ (elementy na grubość)
+                    # Density = Grubość_Pilota / Siatka_Pilota
+                    
+                    # 1. Znajdź kandydata pilota (zazwyczaj pierwszy na liście)
+                    # W idealnym świecie ID w last_pilot_data pozwoliłoby go znaleźć, 
+                    # ale tutaj założymy, że pilotem był self.candidates[0].
+                    if self.candidates:
+                        pilot_cand = self.candidates[0]
+                        min_t = self._get_candidate_thickness(pilot_cand)
+                        
+                        # Obliczamy zagęszczenie jakie osiągnął pilot
+                        # np. Grubość 4.5mm / Siatka 4.27mm = 1.05 el/grubość
+                        optimized_density = min_t / final_mesh_size_mm
+                        
+                        self.pilot_final_mesh_size = optimized_density
+                        self.con.append(f"<b>[INFO] Pilot (Rel): Grubość {min_t}mm -> Siatka {final_mesh_size_mm:.2f}mm</b>")
+                        self.con.append(f"<b>[INFO] Ustawiono start Batcha na gęstość: {optimized_density:.2f} el/grubość</b>")
+                    else:
+                        self.con.append("Błąd: Nie można wyznaczyć gęstości względnej (brak danych kandydata).")
 
     def run_batch(self):
         if not self.cands: return
@@ -1758,13 +1867,20 @@ class Tab4_Fem(QWidget):
         sets = self.get_settings()
 
         # Logika dla trybu BATCH:
-        # Użyj siatki z pilota jeśli jest, w przeciwnym razie siatki z GUI.
-        # Zawsze wykonuj tylko jedną iterację (bez optymalizacji siatki).
         if self.pilot_final_mesh_size is not None:
-            self.con.append(f"<b>[INFO] Używam zoptymalizowanej siatki z pilota ({self.pilot_final_mesh_size:.2f}mm)...</b>")
+            mode = "relative" if self.combo_mesh_mode.currentIndex() == 1 else "absolute"
+            unit = "el/gr" if mode == "relative" else "mm"
+            
+            self.con.append(f"<b>[INFO] Batch używa zoptymalizowanego parametru z pilota: {self.pilot_final_mesh_size:.2f} {unit}</b>")
+            
+            # Nadpisujemy parametr startowy. 
+            # W trybie relative 'mesh_start_size' to gęstość, w absolute to mm.
+            # Dzięki logice w on_pilot_done, self.pilot_final_mesh_size ma już poprawną jednostkę.
             sets['mesh_start_size'] = self.pilot_final_mesh_size
         else:
-            self.con.append("<b>[INFO] Używam siatki z GUI (bez optymalizacji)...</b>")
+            self.con.append("<b>[INFO] Używam ustawień z GUI (bez optymalizacji z pilota)...</b>")
+        
+        # Batch zawsze wykonuje 1 iterację na profil (zakładamy, że parametry z pilota są wystarczające)
         sets['max_iterations'] = 1
 
         self.w = FemWorker(validated_cands, sets)
@@ -2763,10 +2879,20 @@ class MainWindow(QMainWindow):
         self.tab3.request_transfer_shell.connect(self.tab6.receive_data)
         self.tab3.request_transfer_shell.connect(lambda: self.tabs.setCurrentIndex(5))
 
+        # Połączenie sygnałów z Tab4 (FEM Solid)
         self.tab4.batch_finished.connect(self.on_fem_finished)
+        self.tab4.pilot_finished.connect(self.on_fem_pilot_finished)
         self.tab4.profile_started.connect(self.tab5.highlight_profile)
         
         self.tab6.analysis_finished.connect(self.on_shell_fem_finished)
+
+    def on_fem_pilot_finished(self):
+        """Slot wywoływany po zakończeniu pojedynczej analizy 'Pilot'."""
+        self.tabs.setCurrentIndex(4) # Przełącz na Tab 5 (Post-processing)
+        if hasattr(self, 'tab5'):
+            self.tab5.refresh_list()
+        if self.statusBar():
+            self.statusBar().showMessage("✅ Pilot zakończony. Wynik dostępny w Post-processingu.", 10000)
 
     def on_fem_finished(self):
         self.tabs.setCurrentIndex(4) # Przełącz na Tab 5
