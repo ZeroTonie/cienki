@@ -2371,6 +2371,31 @@ class Tab5_Comparison(QWidget):
         self.info_box.setStyleSheet("background-color: #222; color: #eee; font-size: 11px; border: 1px solid #444;")
         l_layout.addWidget(self.info_box)
 
+        # --- [NOWOŚĆ] Opis obliczeń spoiny ---
+        weld_info_group = QGroupBox("Opis Obliczeń Spoiny (FEM)")
+        weld_info_group.setStyleSheet("QGroupBox { font-weight: normal; }")
+        weld_layout = QVBoxLayout(weld_info_group)
+        weld_layout.setContentsMargins(5, 5, 5, 5)
+        weld_desc_html = """
+        <div style="font-size:10px;">
+        <p>Model FEM wyznacza naprężenia w spoinie (oznaczone jako <b>INTERFACE_DATA</b> lub <b>INTERFACE_MAX_SHEAR</b>) w następujący sposób:</p>
+        <ul style="margin-left: 0px; padding-left: 15px;">
+            <li><b>Lokalizacja:</b> Identyfikacja węzłów na styku ceowników z płaskownikiem (grupa <b>GRP_INTERFACE</b>).</li>
+            <li><b>Wartość fizyczna:</b> Pobranie składowych tensora naprężeń tnących: &tau;<sub>xy</sub> (wzdłuż belki) oraz &tau;<sub>yz</sub> (poprzecznie do spoiny).</li>
+            <li><b>Wypadkowa:</b> Prezentowana wartość to wypadkowe naprężenie tnące, obliczane ze wzoru:<br>
+            <p align="center" style="font-size:12px; font-family: Consolas; color: #aaffff;">&tau;<sub>total</sub> = &radic;(&tau;<sub>12</sub><sup>2</sup> + &tau;<sub>23</sub><sup>2</sup>)</p>
+            <p>gdzie 12 i 23 to indeksy kierunków w systemie CalculiX odpowiadające płaszczyźnie styku.</p></li>
+        </ul>
+        </div>
+        """
+        weld_label = QLabel(weld_desc_html)
+        weld_label.setWordWrap(True)
+        weld_label.setTextFormat(Qt.TextFormat.RichText)
+        weld_label.setStyleSheet("background-color: #282828; padding: 5px; border-radius: 3px;")
+        weld_layout.addWidget(weld_label)
+        weld_info_group.setMaximumHeight(180)
+        l_layout.addWidget(weld_info_group)
+
         # 2. Zakładki z Wykresami
         self.chart_tabs = QTabWidget()
         l_layout.addWidget(self.chart_tabs)
@@ -2499,9 +2524,9 @@ class Tab5_Comparison(QWidget):
         """
         
         # Sekcja Reakcji
-        if "REACTIONS" in fem:
-            r = fem["REACTIONS"]
-            html += f"<b>Reakcje (Podpora):</b> Rx={r.get('Fx',0):.0f}N, Ry={r.get('Fy',0):.0f}N, Rz={r.get('Fz',0):.0f}N<br>"
+#        if "REACTIONS" in fem:
+#            r = fem["REACTIONS"]
+#            html += f"<b>Reakcje (Podpora):</b> Rx={r.get('Fx',0):.0f}N, Ry={r.get('Fy',0):.0f}N, Rz={r.get('Fz',0):.0f}N<br>"
         
         # Sekcja Wyboczenia
         if "BUCKLING_FACTORS" in fem and fem["BUCKLING_FACTORS"]:
