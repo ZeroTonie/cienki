@@ -29,7 +29,6 @@ class FemEngineShell:
 
     def _load_metadata(self, base_path_no_ext):
         """Wczytuje grupy węzłów i mapę węzłów."""
-        # Pliki generowane przez engine_geometry_shell to: [Nazwa].inp, [Nazwa]_groups.json
         groups_path = f"{base_path_no_ext}_groups.json"
         nodes_path = f"{base_path_no_ext}_nodes.csv"
         
@@ -44,7 +43,7 @@ class FemEngineShell:
             try:
                 with open(nodes_path, 'r') as f:
                     reader = csv.reader(f)
-                    next(reader, None) # Skip header
+                    next(reader, None)
                     for row in reader:
                         if row: 
                             try: self.nodes_map[int(row[0])] = [float(row[1]), float(row[2]), float(row[3])]
@@ -63,14 +62,10 @@ class FemEngineShell:
         with open(inp_path, 'r') as f: mesh_content = f.read()
 
         deck = []
-        deck.append("** CALCULIX DECK FOR SHELL MODEL (TIE METHOD)")
-        deck.append(mesh_content) # Zawiera węzły, elementy i NSETy wygenerowane przez Gmsh
+        deck.append("** CALCULIX DECK FOR SHELL MODEL (FIXED TIE)")
+        deck.append(mesh_content) 
         
-        # --- DEFINICJE GRUP LOGICZNYCH ---
-        # Tylko te grupy, których Gmsh nie generuje automatycznie lub są specyficzne dla BC
-        # NSET_SUPPORT i NSET_LOAD są w JSON, ale nie zawsze w INP od Gmsh (chyba że jako Physical Point)
-        # Dla bezpieczeństwa definiujemy je jawnie, sprawdzając czy nie dublujemy nazw
-        
+        # --- DEFINICJE GRUP LOGICZNYCH (BC/LOAD) ---
         for g_name in ["NSET_SUPPORT", "NSET_LOAD"]:
             nodes = self.groups.get(g_name, [])
             if nodes:
@@ -80,10 +75,25 @@ class FemEngineShell:
             else:
                 print(f"[FEM-SHELL] WARNING: Empty group {g_name}")
 
-        # --- MAX ID WĘZŁA ---
+        # --- RE-DEFINICJA GRUP SLAVE DLA TIE ---
+        # Tworzymy jawne NSETy dla spoin, aby mieć pewność, że to zbiory węzłów
+        # Unikamy nazw 'LINE_WELD...', bo mogą być już zajęte przez ELSETy z GMSH
+        
+        slave_map = {
+            "LINE_WELD_L_SLAVE": "N_SLAVE_L",
+            "LINE_WELD_R_SLAVE": "N_SLAVE_R"
+        }
+        
+        for json_name, nset_name in slave_map.items():
+            nodes = self.groups.get(json_name, [])
+            if nodes:
+                deck.append(f"*NSET, NSET={nset_name}")
+                for i in range(0, len(nodes), 12):
+                    deck.append(", ".join(map(str, nodes[i:i+12])))
+
+        # --- PARAMETRY ---
         max_id = max(self.nodes_map.keys()) if self.nodes_map else 100000
         
-        # --- MATERIAŁY ---
         mat_name = run_params.get("Stop", "S355")
         mat_db = material_catalogue.baza_materialow()
         if mat_name in mat_db:
@@ -94,6 +104,7 @@ class FemEngineShell:
         else:
             E, nu, rho_fem = 210000.0, 0.3, 7.85e-9
 
+        # Materiały
         deck.append("*MATERIAL, NAME=MAT_SHELL")
         deck.append("*ELASTIC")
         deck.append(f"{E}, {nu}")
@@ -110,38 +121,30 @@ class FemEngineShell:
         pl = run_params.get("plate_data", {})
         pr = run_params.get("profile_data", {})
         
-        # ELSETy SHELL_PLATE, SHELL_WEBS itp. są już w mesh_content (z Gmsh)
         deck.append(f"*SHELL SECTION, ELSET=SHELL_PLATE, MATERIAL=MAT_SHELL\n{pl.get('tp', 10.0)}")
         deck.append(f"*SHELL SECTION, ELSET=SHELL_WEBS, MATERIAL=MAT_SHELL\n{pr.get('twc', 6.0)}")
         deck.append(f"*SHELL SECTION, ELSET=SHELL_FLANGES, MATERIAL=MAT_SHELL\n{pr.get('tfc', 10.0)}")
 
-        # --- POŁĄCZENIA *TIE ---
-        # Wymóg CCX: Master musi być powierzchnią (*SURFACE zdefiniowane na ELSET)
-        # Slave może być zbiorem węzłów (NSET)
-        
-        deck.append("** --- DEFINICJA POWIERZCHNI MASTER (PŁASKOWNIK) ---")
-        # SPOS - dodatnia strona powłoki (zależy od numeracji węzłów, zazwyczaj OK)
+        # --- WIĄZANIA TIE ---
+        deck.append("** --- TIE DEFINITION ---")
+        # Master: Powierzchnia
         deck.append("*SURFACE, NAME=SURF_PLATE_MASTER")
         deck.append("SHELL_PLATE, SPOS")
         
-        deck.append("** --- WIĄZANIA TIE ---")
-        # Obliczamy tolerancję: połowa grubości blachy + połowa grubości stopki + margines
-        # Bo środnik zaczyna się w pewnej odległości od środka blachy
+        # Tolerancja
         gap = (float(pl.get('tp', 10.0)) + float(pr.get('tfc', 10.0))) / 2.0
-        tol = gap * 1.2 # Margines 20%
-        if tol < 1.0: tol = 1.0 # Minimum
+        tol = gap * 1.2
         
-        # Nazwy grup węzłów Slave pochodzą z Gmsh (Physical Groups) -> NSETs w pliku inp
-        # Sprawdzamy czy istnieją w JSON (czy zostały znalezione)
+        # Definicja TIE używająca naszych nowych, pewnych NSETów
         if self.groups.get("LINE_WELD_L_SLAVE"):
             deck.append(f"*TIE, NAME=TIE_L, POSITION TOLERANCE={tol}")
-            deck.append("NSET_LINE_WELD_L_SLAVE, SURF_PLATE_MASTER") # Gmsh dodaje prefix NSET_ do nazw grup
+            deck.append(f"{slave_map['LINE_WELD_L_SLAVE']}, SURF_PLATE_MASTER")
             
         if self.groups.get("LINE_WELD_R_SLAVE"):
             deck.append(f"*TIE, NAME=TIE_R, POSITION TOLERANCE={tol}")
-            deck.append("NSET_LINE_WELD_R_SLAVE, SURF_PLATE_MASTER")
+            deck.append(f"{slave_map['LINE_WELD_R_SLAVE']}, SURF_PLATE_MASTER")
 
-        # --- RIGID ARM (Wprowadzanie obciążenia) ---
+        # --- RIGID ARM ---
         L = float(run_params.get("Length", 1000.0))
         y_cent = float(run_params.get("Y_structure_center", 0.0))
         y_load = float(run_params.get("Y_load_level", 0.0))
@@ -153,12 +156,22 @@ class FemEngineShell:
         deck.append(f"{self.ref_node_structure}, {L}, {y_cent}, 0.0")
         deck.append(f"{self.ref_node_load}, {L}, {y_load}, 0.0")
         
-        # Łączymy strukturę z węzłem A (Rigid Body)
-        # NSET_LOAD zawiera węzły na końcu belki
+        # NSET dla węzłów referencyjnych (dla outputu)
+        deck.append(f"*NSET, NSET=N_REF_STRUCT\n{self.ref_node_structure}")
+        deck.append(f"*NSET, NSET=N_REF_LOAD\n{self.ref_node_load}")
+
+        # Masa stabilizująca
+        deck.append("*ELEMENT, TYPE=MASS, ELSET=E_MASS_REF")
+        deck.append(f"{max_id+200}, {self.ref_node_structure}")
+        deck.append(f"{max_id+201}, {self.ref_node_load}")
+        deck.append("*MASS, ELSET=E_MASS_REF")
+        deck.append("1e-6")
+        
+        # Rigid Body Constraint
         if self.groups.get("NSET_LOAD"):
             deck.append(f"*RIGID BODY, NSET=NSET_LOAD, REF NODE={self.ref_node_structure}")
             
-        # Element belkowy łączący A i B (ramię)
+        # Beam Element
         deck.append(f"*ELEMENT, TYPE=B31, ELSET=EL_ARM")
         deck.append(f"{max_id+100}, {self.ref_node_structure}, {self.ref_node_load}")
         deck.append(f"*BEAM SECTION, ELSET=EL_ARM, MATERIAL=MAT_RIGID, SECTION=RECT\n50.0, 50.0\n1.0, 0.0, 0.0")
@@ -167,9 +180,6 @@ class FemEngineShell:
         deck.append("*STEP\n*STATIC")
         if self.groups.get("NSET_SUPPORT"):
             deck.append("*BOUNDARY\nNSET_SUPPORT, 1, 6, 0.0")
-            
-        # Zablokowanie obrotu belki ramienia, żeby nie była mechanizmem
-        # deck.append(f"*BOUNDARY\n{self.ref_node_structure}, 4, 5, 0.0") # Opcjonalne
             
         deck.append("*CLOAD")
         tn = self.ref_node_load
@@ -183,8 +193,8 @@ class FemEngineShell:
         if abs(my)>1e-9: deck.append(f"{tn}, 5, {my}")
         if abs(mz)>1e-9: deck.append(f"{tn}, 6, {mz}")
         
-        deck.append(f"*NODE PRINT, NSET=NSET_LOAD\nU") # Monitoruj grupę LOAD
-        deck.append(f"*NODE PRINT, NSET=NSET_{self.ref_node_structure}\nU") # Monitoruj ref node
+        # Output Requests
+        deck.append(f"*NODE PRINT, NSET=N_REF_STRUCT\nU") 
         deck.append("*EL PRINT, ELSET=SHELL_PLATE\nS")
         deck.append("*END STEP")
         
@@ -243,7 +253,6 @@ class FemEngineShell:
                         try: res["BUCKLING_FACTORS"].append(float(l.split()[-1]))
                         except: pass
                         
-                    # Szukamy przemieszczeń węzła referencyjnego (sprawdzamy ID)
                     if mode == "static" and self.ref_node_structure:
                         parts = l.split()
                         if len(parts) > 3 and parts[0] == str(self.ref_node_structure):
@@ -253,17 +262,15 @@ class FemEngineShell:
                                 res["DISPLACEMENTS_REF"]["Uz"] = float(parts[3])
                             except: pass
             
-            # Weryfikacja zbieżności
-            # Jeśli znaleziono krok, ale przemieszczenia są 0.0 (przy niezerowej sile), to błąd
             if step_found:
-                u_mag = abs(res["DISPLACEMENTS_REF"]["Uy"]) + abs(res["DISPLACEMENTS_REF"]["Uz"])
+                u_mag = abs(res["DISPLACEMENTS_REF"]["Uy"]) + abs(res["DISPLACEMENTS_REF"]["Uz"]) + abs(res["DISPLACEMENTS_REF"]["Ux"])
                 if u_mag > 1e-9: 
                     res["converged"] = True
-                    # Tutaj można by dodać czytanie Max VM z pliku frd lub dat (wymaga więcej parsowania)
-                    # Dla uproszczenia wstawiamy wartość "placeholder" lub parsujemy dokładniej
-                    res["MODEL_MAX_VM"] = 100.0 # Placeholder, wymaga parsowania S Mises
+                    res["MODEL_MAX_VM"] = 100.0 
                 else:
-                    res["converged"] = False # Solver padł lub zerowe obciążenie
-                    
+                    res["converged"] = False 
+            else:
+                res["converged"] = False
+
         except: pass
         return res

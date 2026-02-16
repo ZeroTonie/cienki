@@ -19,14 +19,12 @@ class GeometryGeneratorShell:
         try:
             if not gmsh.isInitialized(): gmsh.initialize()
             gmsh.clear()
-            # Ustawienia dla stabilności
-            gmsh.option.setNumber("General.Terminal", 1) # Logi kernela
+            gmsh.option.setNumber("General.Terminal", 1) 
             gmsh.option.setNumber("Geometry.Tolerance", 1e-4) 
             gmsh.option.setNumber("Geometry.OCCAutoFix", 1)
         except: pass
 
     def _finalize_gmsh(self):
-        # Nie zamykamy całkowicie, aby procesy nadrzędne mogły używać
         pass
 
     def generate_model(self, params):
@@ -39,7 +37,6 @@ class GeometryGeneratorShell:
             lc_global = float(mesh_cfg.get('global', 20.0))
             order = int(mesh_cfg.get('order', 2))
             
-            # Algorytm 6: Frontal 2D (dobry dla Shell) lub 1: Delaunay
             gmsh.option.setNumber("Mesh.Algorithm", 6)
             gmsh.option.setNumber("Mesh.ElementOrder", order)
 
@@ -61,189 +58,124 @@ class GeometryGeneratorShell:
             bp = float(pl_data['bp'])
 
             # --- GEOMETRIA ---
-            # Układ: Blacha w Y=0 (środek), Ceowniki dosunięte (z przerwą na grubości)
-            
-            # Współrzędne Y
             y_plate = 0.0
-            # Środek stopki dolnej ceownika (odległość = połowa grubości blachy + połowa grubości stopki)
             y_web_bot = tp/2.0 + tfc/2.0
             y_web_top = tp/2.0 + hc - tfc/2.0
             
-            # Współrzędne Z
-            z_plate_L = -bp/2.0
-            z_plate_R = bp/2.0
-            
-            # Środniki (odsunięte o połowę grubości środnika od krawędzi)
-            z_web_L = -bp/2.0 + twc/2.0
-            z_web_R = bp/2.0 - twc/2.0
-            
-            # Długość stopki (modelowa)
+            z_plate_L, z_plate_R = -bp/2.0, bp/2.0
+            z_web_L, z_web_R = -bp/2.0 + twc/2.0, bp/2.0 - twc/2.0
             flange_len = bc - twc/2.0
 
-            # A. PŁASKOWNIK (Linia -> Ekstruzja)
-            pt_pl_1 = factory.addPoint(0, y_plate, z_plate_L)
-            pt_pl_2 = factory.addPoint(0, y_plate, z_plate_R)
-            l_plate = factory.addLine(pt_pl_1, pt_pl_2)
+            # Płaskownik
+            p1 = factory.addPoint(0, y_plate, z_plate_L)
+            p2 = factory.addPoint(0, y_plate, z_plate_R)
+            l_plate = factory.addLine(p1, p2)
             
-            # B. CEOWNIKI (Punkty startowe przekroju)
-            # Lewy
-            p_LB_root = factory.addPoint(0, y_web_bot, z_web_L) # Punkt styku (wirtualnego)
-            p_LB_tip = factory.addPoint(0, y_web_bot, z_web_L + flange_len) 
-            l_LB_flange = factory.addLine(p_LB_tip, p_LB_root)
-            
-            p_LT_root = factory.addPoint(0, y_web_top, z_web_L)
-            l_L_web = factory.addLine(p_LB_root, p_LT_root)
-            
-            p_LT_tip = factory.addPoint(0, y_web_top, z_web_L + flange_len)
-            l_LT_flange = factory.addLine(p_LT_root, p_LT_tip)
-            
-            # Prawy
-            p_RB_root = factory.addPoint(0, y_web_bot, z_web_R)
-            p_RB_tip = factory.addPoint(0, y_web_bot, z_web_R - flange_len) 
-            l_RB_flange = factory.addLine(p_RB_tip, p_RB_root)
-            
-            p_RT_root = factory.addPoint(0, y_web_top, z_web_R)
-            l_R_web = factory.addLine(p_RB_root, p_RT_root)
-            
-            p_RT_tip = factory.addPoint(0, y_web_top, z_web_R - flange_len)
-            l_RT_flange = factory.addLine(p_RT_root, p_RT_tip)
+            # Ceowniki
+            pL1 = factory.addPoint(0, y_web_bot, z_web_L)
+            pL2 = factory.addPoint(0, y_web_bot, z_web_L + flange_len)
+            lL_bot = factory.addLine(pL2, pL1)
+            pL3 = factory.addPoint(0, y_web_top, z_web_L)
+            lL_web = factory.addLine(pL1, pL3)
+            pL4 = factory.addPoint(0, y_web_top, z_web_L + flange_len)
+            lL_top = factory.addLine(pL3, pL4)
 
-            # --- EKSTRUZJA Z JEDNOCZESNYM POBRANIEM TAGÓW ---
-            # Funkcja pomocnicza zwracająca (powierzchnia, linia_góra, linia_bok, linia_dół)
-            # Ale tutaj extrude(Point) -> Line, extrude(Line) -> Surface.
-            
-            def safe_extrude(tag_dim_1):
-                # Extrude zwraca listę [(dim, tag), (dim, tag)...]
-                # Dla linii (dim=1) -> [(2, surface_tag), (1, top), (1, sides)...]
-                res = factory.extrude([(1, tag_dim_1)], L, 0, 0)
-                surf_tag = -1
-                for dim, tag in res:
-                    if dim == 2: surf_tag = tag
-                return surf_tag
-
-            def safe_extrude_point(tag_dim_0):
-                # Extrude Punktu -> Linia
-                res = factory.extrude([(0, tag_dim_0)], L, 0, 0)
-                line_tag = -1
-                for dim, tag in res:
-                    if dim == 1: line_tag = tag
-                return line_tag
-
-            # Ekstruzja powierzchni
-            s_plate = safe_extrude(l_plate)
-            
-            s_L_fbot = safe_extrude(l_LB_flange)
-            s_L_web  = safe_extrude(l_L_web)
-            s_L_ftop = safe_extrude(l_LT_flange)
-            
-            s_R_fbot = safe_extrude(l_RB_flange)
-            s_R_web  = safe_extrude(l_R_web)
-            s_R_ftop = safe_extrude(l_RT_flange)
-
-            # [FIX] Ekstruzja linii "styku" (dla grupy Slave)
-            # Ekstrudujemy punkty startowe środników wzdłuż L, aby uzyskać krawędź
-            l_weld_L_slave = safe_extrude_point(p_LB_root)
-            l_weld_R_slave = safe_extrude_point(p_RB_root)
+            pR1 = factory.addPoint(0, y_web_bot, z_web_R)
+            pR2 = factory.addPoint(0, y_web_bot, z_web_R - flange_len)
+            lR_bot = factory.addLine(pR2, pR1)
+            pR3 = factory.addPoint(0, y_web_top, z_web_R)
+            lR_web = factory.addLine(pR1, pR3)
+            pR4 = factory.addPoint(0, y_web_top, z_web_R - flange_len)
+            lR_top = factory.addLine(pR3, pR4)
 
             factory.synchronize()
 
-            # --- DEFINICJA GRUP FIZYCZNYCH ---
-            # 1. Płaskownik (Master Surface)
-            gmsh.model.addPhysicalGroup(2, [s_plate], name="SHELL_PLATE")
-            
-            # 2. Reszta profilu
-            gmsh.model.addPhysicalGroup(2, [s_L_web, s_R_web], name="SHELL_WEBS")
-            gmsh.model.addPhysicalGroup(2, [s_L_fbot, s_L_ftop, s_R_fbot, s_R_ftop], name="SHELL_FLANGES")
+            # Ekstruzja
+            def safe_extrude(line_tag):
+                if line_tag < 0: return -1
+                res = factory.extrude([(1, line_tag)], L, 0, 0)
+                for dim, tag in res:
+                    if dim == 2: return tag
+                return -1
 
-            # 3. Linie Styku (Slave Lines dla TIE)
-            # Ważne: To muszą być te same linie, które są krawędziami s_L_web/s_R_web.
-            # safe_extrude_point zwraca nową linię, ale ponieważ p_LB_root jest końcem l_L_web, 
-            # OCC *powinien* zachować topologię lub zduplikować.
-            # W OCC extrude tworzy nową geometrię. Sprawdźmy spójność.
-            # Ponieważ p_LB_root był użyty do l_L_web, extrude l_L_web stworzyło s_L_web I 3 linie brzegowe.
-            # Jedna z tych linii to "szyna" wzdłuż X. 
-            # Użycie safe_extrude_point tworzy DUPLIKAT linii w tym samym miejscu.
-            # Aby uniknąć duplikatów, lepiej pobrać brzeg powierzchni s_L_web.
-            
-            # [METODA BEZPIECZNA]: RemoveDuplicate, a potem pobranie linii z powierzchni.
+            s_plate = safe_extrude(l_plate)
+            s_L_bot = safe_extrude(lL_bot)
+            s_L_web = safe_extrude(lL_web)
+            s_L_top = safe_extrude(lL_top)
+            s_R_bot = safe_extrude(lR_bot)
+            s_R_web = safe_extrude(lR_web)
+            s_R_top = safe_extrude(lR_top)
+
+            factory.synchronize()
             factory.removeAllDuplicates()
             factory.synchronize()
+
+            # Grupy fizyczne
+            if s_plate != -1:
+                gmsh.model.addPhysicalGroup(2, [s_plate], name="SHELL_PLATE")
             
-            # Funkcja znajdująca linię w powierzchni s_web na dole (y = y_web_bot)
-            def get_bottom_line(surf_tag, y_target):
+            web_surfs = [s for s in [s_L_web, s_R_web] if s != -1]
+            if web_surfs: gmsh.model.addPhysicalGroup(2, web_surfs, name="SHELL_WEBS")
+            
+            flange_surfs = [s for s in [s_L_bot, s_L_top, s_R_bot, s_R_top] if s != -1]
+            if flange_surfs: gmsh.model.addPhysicalGroup(2, flange_surfs, name="SHELL_FLANGES")
+
+            # Szukanie krawędzi dla TIE
+            def get_bottom_line(surf_tag, y_target, z_target):
+                if surf_tag == -1: return -1
                 boundary = gmsh.model.getBoundary([(2, surf_tag)], oriented=False)
+                candidates = []
                 for dim, tag in boundary:
                     if dim == 1:
-                        # Sprawdź czy linia leży na y_target
-                        com = gmsh.model.occ.getCenterOfMass(1, tag)
-                        if abs(com[1] - y_target) < 0.1:
-                            # Sprawdź czy jest długa (wzdłuż X)
-                            bbox = gmsh.model.getBoundingBox(1, tag)
-                            length_x = abs(bbox[3] - bbox[0])
-                            if length_x > L * 0.9:
-                                return tag
-                return None
+                        cm = gmsh.model.occ.getCenterOfMass(1, tag)
+                        if abs(cm[1] - y_target) < 0.1 and abs(cm[2] - z_target) < 0.1:
+                            candidates.append(tag)
+                best_tag = -1; max_len = -1.0
+                for tag in candidates:
+                    bbox = gmsh.model.getBoundingBox(1, tag)
+                    lx = abs(bbox[3] - bbox[0])
+                    if lx > max_len: max_len = lx; best_tag = tag
+                return best_tag
 
-            real_slave_L = get_bottom_line(s_L_web, y_web_bot)
-            real_slave_R = get_bottom_line(s_R_web, y_web_bot)
+            slave_L = get_bottom_line(s_L_web, y_web_bot, z_web_L)
+            slave_R = get_bottom_line(s_R_web, y_web_bot, z_web_R)
             
-            if real_slave_L: gmsh.model.addPhysicalGroup(1, [real_slave_L], name="LINE_WELD_L_SLAVE")
-            if real_slave_R: gmsh.model.addPhysicalGroup(1, [real_slave_R], name="LINE_WELD_R_SLAVE")
+            if slave_L != -1: gmsh.model.addPhysicalGroup(1, [slave_L], name="LINE_WELD_L_SLAVE")
+            if slave_R != -1: gmsh.model.addPhysicalGroup(1, [slave_R], name="LINE_WELD_R_SLAVE")
 
-            # --- SIATKOWANIE ---
-            # Ustawienie rozmiaru
+            # Siatkowanie
             gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc_global)
-            
             self.log("Generowanie siatki...")
             gmsh.model.mesh.generate(2)
-            
-            # Weryfikacja
-            if gmsh.model.mesh.getNodes()[0].size == 0:
-                raise Exception("Mesh generation failed (0 nodes).")
+            if order == 2: gmsh.model.mesh.setOrder(2)
 
-            if order == 2:
-                self.log("Konwersja do elementów 2. rzędu...")
-                gmsh.model.mesh.setOrder(2)
-
-            # --- EKSPORT ---
-            # Nazewnictwo: Używamy czystej nazwy, suffixy tylko w rozszerzeniu
+            # Eksport
             path_inp = os.path.join(out_dir, f"{name}.inp")
             path_msh = os.path.join(out_dir, f"{name}.msh")
             groups_json = os.path.join(out_dir, f"{name}_groups.json")
             nodes_csv = os.path.join(out_dir, f"{name}_nodes.csv")
 
-            # Zapisz siatkę CalculiX (to automatycznie zapisuje NSET i ELSET dla grup fizycznych)
             gmsh.write(path_inp)
             gmsh.write(path_msh)
             
-            # --- DODATKOWE GRUPY LOGICZNE (Support / Load) ---
-            # Te grupy nie są fizycznymi elementami, tylko zbiorami węzłów na końcach
             supp_nodes = self._get_nodes_in_x_plane(0.0, tol=1.0)
             load_nodes = self._get_nodes_in_x_plane(L, tol=1.0)
             
-            self.log(f"Węzły Support: {len(supp_nodes)}, Load: {len(load_nodes)}")
-
-            # Pobieramy też ID węzłów Slave, aby mieć pewność (opcjonalne, bo NSET jest w INP)
-            # Ale zapisujemy je do JSON dla spójności
-            slave_L_nodes = self._get_nodes_from_physical_group(1, "LINE_WELD_L_SLAVE")
-            slave_R_nodes = self._get_nodes_from_physical_group(1, "LINE_WELD_R_SLAVE")
+            slave_l_ids = self._get_nodes_from_physical_group(1, "LINE_WELD_L_SLAVE")
+            slave_r_ids = self._get_nodes_from_physical_group(1, "LINE_WELD_R_SLAVE")
 
             groups_data = {
                 "NSET_SUPPORT": supp_nodes,
                 "NSET_LOAD": load_nodes,
-                "LINE_WELD_L_SLAVE": slave_L_nodes,
-                "LINE_WELD_R_SLAVE": slave_R_nodes
+                "LINE_WELD_L_SLAVE": slave_l_ids,
+                "LINE_WELD_R_SLAVE": slave_r_ids
             }
             
             with open(groups_json, 'w') as f: json.dump(groups_data, f)
             self._export_node_map(nodes_csv)
 
             return {
-                "paths": {
-                    "inp": os.path.abspath(path_inp),
-                    "nodes_csv": os.path.abspath(nodes_csv),
-                    "groups_json": os.path.abspath(groups_json)
-                },
+                "paths": {"inp": os.path.abspath(path_inp), "nodes_csv": os.path.abspath(nodes_csv), "groups_json": os.path.abspath(groups_json)},
                 "stats": {"nodes": gmsh.model.mesh.getNodes()[0].size}
             }
             
@@ -259,7 +191,6 @@ class GeometryGeneratorShell:
             node_tags, coords, _ = gmsh.model.mesh.getNodes()
             selected = []
             for i in range(len(node_tags)):
-                # coords jest płaskie [x,y,z, x,y,z...]
                 if abs(coords[3*i] - x_loc) < tol:
                     selected.append(int(node_tags[i]))
             return selected
@@ -271,10 +202,8 @@ class GeometryGeneratorShell:
             target_tag = -1
             for d, t in group_tags:
                 if gmsh.model.getPhysicalName(d, t) == name:
-                    target_tag = t
-                    break
+                    target_tag = t; break
             if target_tag == -1: return []
-            
             entities = gmsh.model.getEntitiesForPhysicalGroup(dim, target_tag)
             all_nodes = set()
             for e in entities:
@@ -289,6 +218,5 @@ class GeometryGeneratorShell:
             with open(path, 'w', newline='') as f:
                 w = csv.writer(f)
                 w.writerow(["NodeID", "X", "Y", "Z"])
-                for i in range(len(tags)):
-                    w.writerow([int(tags[i]), coords[3*i], coords[3*i+1], coords[3*i+2]])
+                for i in range(len(tags)): w.writerow([int(tags[i]), coords[3*i], coords[3*i+1], coords[3*i+2]])
         except: pass
