@@ -61,36 +61,32 @@ class GeometryGeneratorShell:
             y_plate = 0.0
             y_web_bot = tp/2.0 + tfc/2.0
             y_web_top = tp/2.0 + hc - tfc/2.0
-            
             z_plate_L, z_plate_R = -bp/2.0, bp/2.0
             z_web_L, z_web_R = -bp/2.0 + twc/2.0, bp/2.0 - twc/2.0
             flange_len = bc - twc/2.0
 
-            # Płaskownik
+            # 1. PŁASKOWNIK
             p1 = factory.addPoint(0, y_plate, z_plate_L)
             p2 = factory.addPoint(0, y_plate, z_plate_R)
             l_plate = factory.addLine(p1, p2)
             
-            # Ceowniki
-            pL1 = factory.addPoint(0, y_web_bot, z_web_L)
-            pL2 = factory.addPoint(0, y_web_bot, z_web_L + flange_len)
-            lL_bot = factory.addLine(pL2, pL1)
-            pL3 = factory.addPoint(0, y_web_top, z_web_L)
-            lL_web = factory.addLine(pL1, pL3)
-            pL4 = factory.addPoint(0, y_web_top, z_web_L + flange_len)
-            lL_top = factory.addLine(pL3, pL4)
+            # 2. CEOWNIKI
+            def make_upe(z_pos, direction):
+                p_root = factory.addPoint(0, y_web_bot, z_pos)
+                p_tip_bot = factory.addPoint(0, y_web_bot, z_pos + flange_len * direction)
+                l_bot = factory.addLine(p_tip_bot, p_root)
+                p_top = factory.addPoint(0, y_web_top, z_pos)
+                l_web = factory.addLine(p_root, p_top)
+                p_tip_top = factory.addPoint(0, y_web_top, z_pos + flange_len * direction)
+                l_top = factory.addLine(p_top, p_tip_top)
+                return l_bot, l_web, l_top
 
-            pR1 = factory.addPoint(0, y_web_bot, z_web_R)
-            pR2 = factory.addPoint(0, y_web_bot, z_web_R - flange_len)
-            lR_bot = factory.addLine(pR2, pR1)
-            pR3 = factory.addPoint(0, y_web_top, z_web_R)
-            lR_web = factory.addLine(pR1, pR3)
-            pR4 = factory.addPoint(0, y_web_top, z_web_R - flange_len)
-            lR_top = factory.addLine(pR3, pR4)
+            lL_bot, lL_web, lL_top = make_upe(z_web_L, 1)
+            lR_bot, lR_web, lR_top = make_upe(z_web_R, -1)
 
             factory.synchronize()
 
-            # Ekstruzja
+            # --- EKSTRUZJA ---
             def safe_extrude(line_tag):
                 if line_tag < 0: return -1
                 res = factory.extrude([(1, line_tag)], L, 0, 0)
@@ -99,9 +95,11 @@ class GeometryGeneratorShell:
                 return -1
 
             s_plate = safe_extrude(l_plate)
+            
             s_L_bot = safe_extrude(lL_bot)
             s_L_web = safe_extrude(lL_web)
             s_L_top = safe_extrude(lL_top)
+            
             s_R_bot = safe_extrude(lR_bot)
             s_R_web = safe_extrude(lR_web)
             s_R_top = safe_extrude(lR_top)
@@ -110,7 +108,7 @@ class GeometryGeneratorShell:
             factory.removeAllDuplicates()
             factory.synchronize()
 
-            # Grupy fizyczne
+            # --- GRUPY FIZYCZNE ---
             if s_plate != -1:
                 gmsh.model.addPhysicalGroup(2, [s_plate], name="SHELL_PLATE")
             
@@ -120,17 +118,17 @@ class GeometryGeneratorShell:
             flange_surfs = [s for s in [s_L_bot, s_L_top, s_R_bot, s_R_top] if s != -1]
             if flange_surfs: gmsh.model.addPhysicalGroup(2, flange_surfs, name="SHELL_FLANGES")
 
-            # Szukanie krawędzi dla TIE
+            # --- KRAWĘDZIE DLA TIE (SLAVE) ---
             def get_bottom_line(surf_tag, y_target, z_target):
                 if surf_tag == -1: return -1
-                boundary = gmsh.model.getBoundary([(2, surf_tag)], oriented=False)
+                bounds = gmsh.model.getBoundary([(2, surf_tag)], oriented=False)
                 candidates = []
-                for dim, tag in boundary:
+                for dim, tag in bounds:
                     if dim == 1:
                         cm = gmsh.model.occ.getCenterOfMass(1, tag)
-                        if abs(cm[1] - y_target) < 0.1 and abs(cm[2] - z_target) < 0.1:
+                        if abs(cm[1]-y_target) < 0.1 and abs(cm[2]-z_target) < 0.1:
                             candidates.append(tag)
-                best_tag = -1; max_len = -1.0
+                best_tag = -1; max_len = -1
                 for tag in candidates:
                     bbox = gmsh.model.getBoundingBox(1, tag)
                     lx = abs(bbox[3] - bbox[0])
@@ -143,13 +141,13 @@ class GeometryGeneratorShell:
             if slave_L != -1: gmsh.model.addPhysicalGroup(1, [slave_L], name="LINE_WELD_L_SLAVE")
             if slave_R != -1: gmsh.model.addPhysicalGroup(1, [slave_R], name="LINE_WELD_R_SLAVE")
 
-            # Siatkowanie
+            # --- SIATKOWANIE ---
             gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc_global)
             self.log("Generowanie siatki...")
             gmsh.model.mesh.generate(2)
             if order == 2: gmsh.model.mesh.setOrder(2)
 
-            # Eksport
+            # --- EKSPORT ---
             path_inp = os.path.join(out_dir, f"{name}.inp")
             path_msh = os.path.join(out_dir, f"{name}.msh")
             groups_json = os.path.join(out_dir, f"{name}_groups.json")
@@ -180,7 +178,7 @@ class GeometryGeneratorShell:
             }
             
         except Exception as e:
-            self.log(f"CRITICAL ERROR in Geometry Generation: {e}")
+            self.log(f"CRITICAL ERROR: {e}")
             traceback.print_exc()
             return None
         finally:
@@ -218,5 +216,6 @@ class GeometryGeneratorShell:
             with open(path, 'w', newline='') as f:
                 w = csv.writer(f)
                 w.writerow(["NodeID", "X", "Y", "Z"])
-                for i in range(len(tags)): w.writerow([int(tags[i]), coords[3*i], coords[3*i+1], coords[3*i+2]])
+                for i in range(len(tags)):
+                    w.writerow([int(tags[i]), coords[3*i], coords[3*i+1], coords[3*i+2]])
         except: pass

@@ -2853,7 +2853,7 @@ class MainWindow(QMainWindow):
         self.router = router
         self.aggregator = data_aggregator.DataAggregator(self.router)
         self.aggregator_shell = DataAggregatorShell(self.router)
-        self.optimizer_shell = FemOptimizerShell(self.router.base_output_dir)
+        self.optimizer_shell = FemOptimizerShell(self.router)
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -2871,8 +2871,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab3, "3. Selektor Wyników")
         self.tabs.addTab(self.tab4, "4. Analiza FEM (Solid)")
         self.tabs.addTab(self.tab5, "5. Post-processing (Solid)")
-        self.tabs.addTab(self.tab6, "6. Analiza FEM (Shell)")
-        self.tabs.addTab(self.tab7, "7. Post-processing (Shell)")
+        self.tabs.addTab(self.tab6, "6. Analiza FEM (Shell)-DEVELOPMENT")
+        self.tabs.addTab(self.tab7, "7. Post-processing (Shell)-DEVELOPMENT")
 
         self.tab3.request_transfer.connect(self.tab4.receive_data)
         self.tab3.request_transfer.connect(lambda: self.tabs.setCurrentIndex(3))
