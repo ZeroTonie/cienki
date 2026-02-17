@@ -15,7 +15,15 @@ import shutil
 
 class ProjectRouting:
     def __init__(self, base_output_dir="WYNIKI"):
-        self.root_dir = os.path.dirname(os.path.abspath(__file__))
+        # --- ZMIANA DLA EXE ---
+        if getattr(sys, 'frozen', False):
+            # Jeśli program jest uruchomiony jako .exe, ścieżką główną jest folder z plikiem .exe
+            self.root_dir = os.path.dirname(sys.executable)
+        else:
+            # Jeśli uruchamiamy z kodu w VS Code
+            self.root_dir = os.path.dirname(os.path.abspath(__file__))
+        # ----------------------
+
         self.base_output_dir = os.path.join(self.root_dir, base_output_dir)
         self.current_project_name = "Default_Project"
         self.project_path = ""
@@ -29,7 +37,7 @@ class ProjectRouting:
             "TEMP": "99_Temp"
         }
         
-        # Ścieżka do CalculiX (zgodnie z Twoją instrukcją)
+        # Ścieżka do CalculiX
         self.ccx_path = os.path.join(self.root_dir, "solver_bin", "ccx.exe")
 
     def set_project(self, project_name=None):
