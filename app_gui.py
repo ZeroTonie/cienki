@@ -542,7 +542,12 @@ class OptimizationWorker(QThread):
             import config_solver
             importlib.reload(config_solver)
             
-            root_dir = os.path.dirname(os.path.abspath(__file__))
+            if getattr(sys, 'frozen', False):
+                # Jeśli program to .exe, szukaj obok pliku .exe
+                root_dir = os.path.dirname(sys.executable)
+            else:
+                # Jeśli uruchamiamy z VS Code
+                root_dir = os.path.dirname(os.path.abspath(__file__))
             module_name = "solver_1_standard"
             possible_folders = ["solvers_opt", "solvers_opty"]
             solvers_subdir = None
@@ -3003,11 +3008,12 @@ if __name__ == "__main__":
         
         info_text = f"""
         <p><b>Autor:</b> Marek Banach, student Politechniki Opolskiej</p>
-        <p><b>Data wersji:</b> {creation_date}</p>
+        <p><b>Data wersji:</b>17.02.2026</p>
         <hr>
         <p><b>Zastrzeżenie:</b></p>
-        <p>Program został stworzony przy wsparciu środowisk AI. Twórca nie ponosi odpowiedzialności za uzyskane wyniki. Każdorazowo wyniki należy zweryfikować samodzielnie zgodnie z obowiązującymi przepisami prawa i normami branżowymi.</p>
+        <p>Autor nie ponosi odpowiedzialności za uzyskane wyniki. Każdorazowo wyniki należy zweryfikować samodzielnie zgodnie z obowiązującymi przepisami prawa i normami branżowymi.</p>
         <p><i>Proszę zapoznać się z dokumentacją w zakładce "Baza Wiedzy".</i></p>
+        <p><i>Program kodowany w VS code przy wsparciu środowisk AI.</i></p>
         """
         splash_message.setText(info_text)
         splash_message.setStandardButtons(QMessageBox.StandardButton.Ok)
