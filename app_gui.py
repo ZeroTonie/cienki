@@ -2976,8 +2976,43 @@ if __name__ == "__main__":
     app.setPalette(p)
     
     try:
+        # 1. Inicjalizacja głównego okna (wczytywanie bibliotek trwa w tle)
         window = MainWindow()
         window.show()
+        
+        # 2. ZAMKNIĘCIE EKRANU POWITALNEGO (SPLASH SCREEN)
+        # To zadziała tylko w skompilowanym EXE. W VS Code zostanie zignorowane.
+        try:
+            import pyi_splash
+            if pyi_splash.is_alive():
+                pyi_splash.close()
+        except ImportError:
+            pass
+
+        # Wyświetlenie okna powitalnego
+        splash_message = QMessageBox()
+        splash_message.setWindowTitle("Informacje o programie")
+        splash_message.setIcon(QMessageBox.Icon.Information)
+        
+        try:
+            # Używamy daty modyfikacji pliku jako przybliżonej daty "stworzenia" / wersji
+            creation_timestamp = os.path.getmtime(__file__)
+            creation_date = datetime.fromtimestamp(creation_timestamp).strftime("%Y-%m-%d")
+        except:
+            creation_date = "N/A" # Fallback
+        
+        info_text = f"""
+        <p><b>Autor:</b> Marek Banach, student Politechniki Opolskiej</p>
+        <p><b>Data wersji:</b> {creation_date}</p>
+        <hr>
+        <p><b>Zastrzeżenie:</b></p>
+        <p>Program został stworzony przy wsparciu środowisk AI. Twórca nie ponosi odpowiedzialności za uzyskane wyniki. Każdorazowo wyniki należy zweryfikować samodzielnie zgodnie z obowiązującymi przepisami prawa i normami branżowymi.</p>
+        <p><i>Proszę zapoznać się z dokumentacją w zakładce "Baza Wiedzy".</i></p>
+        """
+        splash_message.setText(info_text)
+        splash_message.setStandardButtons(QMessageBox.StandardButton.Ok)
+        splash_message.exec()
+
         sys.exit(app.exec())
     except Exception as e:
         handle_exception(type(e), e, e.__traceback__)

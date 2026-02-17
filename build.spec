@@ -2,12 +2,11 @@
 
 block_cipher = None
 
-# Lista modułów, których PyInstaller może nie wykryć automatycznie
 hidden_imports = [
-    'solvers_opt.solver_1_standard',  # Twój dynamiczny solver
-    'vtk',                            # Potrzebne dla PyVista
+    'solvers_opt.solver_1_standard',
+    'vtk',
     'pyvistaqt',
-    'sklearn.utils._typedefs',        # Często wymagane przez scikit-learn/pandas
+    'sklearn.utils._typedefs',
     'scipy.special.cython_special'
 ]
 
@@ -28,17 +27,30 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# --- KONFIGURACJA SPLASH SCREENA ---
+splash = Splash(
+    'logo.png',                # Nazwa Twojego obrazka (musi być w folderze projektu!)
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(10, 50),
+    text_size=12,
+    text_color='white',
+    minify_script=True,
+    always_on_top=True,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,                    # <--- Dodajemy splash tutaj
     [],
     exclude_binaries=True,
-    name='OptymalizatorSlupa',  # Nazwa Twojego programu
+    name='OptymalizatorSlupa',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,               # Zmień na False, jeśli chcesz ukryć czarne okno
+    console=False,             # <--- Wyłączamy czarne okno konsoli
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -51,6 +63,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
+    splash.binaries,           # <--- Dodajemy binaria splasha do folderu
     strip=False,
     upx=True,
     upx_exclude=[],
